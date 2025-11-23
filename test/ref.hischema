@@ -23,8 +23,27 @@ struct PlayerState {
   i32 posZ? : 20;
 }
 
+// a bitfield of a specific size with defined flags
+// allowed it u8, u16, u32, u64
+bitset PlayerFlags : u8 {
+  isBanned, // 1 << 0
+  emailConfirmed, // 1 << 1
+  isAdmin // 1 << 2
+}
+
+// In C code this would look like this
+//
+// typedef enum PlayerFlags {
+//   PlayerFlags_isBanned = 1 << 0;
+//   PlayerFlags_emailConfirmed = 1 << 1;
+//   PlayerFlags_isAdmin = 1 << 2;
+// } PlayerFlags;
+//
+// typedef uint8_t playerFlagsBitField;
+
 message Player {
   u32 id;
+  PlayerFlags flags;
   Class class = .mage;
   Achievements[] colors;
 }

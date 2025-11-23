@@ -387,6 +387,7 @@ typedef struct {
     bool is_array;
     bool is_optional;
     bool is_deprecated;
+    uint32_t bit_width;
 } CompatField;
 
 typedef struct {
@@ -1062,6 +1063,10 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
     for (size_t i = 0; i < def->field_count; ++i) {
         if (def->fields[i].is_optional) { optional_count++; }
     }
+    bool has_bitfields = false;
+    for (size_t i = 0; i < def->field_count; ++i) {
+        if (def->fields[i].bit_width > 0) { has_bitfields = true; break; }
+    }
 
     if (optional_count > 0) {
         uint32_t bitmask_size = (optional_count + 7) / 8;
@@ -1077,15 +1082,22 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
         }
         sb_append(impl, "    if (!%sbuffer_write_bytes(buffer, bitmask, sizeof(bitmask))) { return false; }\n", schema->prefix);
     }
+    if (has_bitfields) {
+        sb_append(impl, "    %sBitWriter bit_writer = {0, 0};\n", schema->prefix);
+    }
 
     for (size_t i = 0; i < def->field_count; ++i) {
         const FieldDef *field = &def->fields[i];
+        bool is_bitfield = field->bit_width > 0;
         
         if (field->is_optional) {
             sb_append(impl, "    if (value->has_%s) {\n", field->name);
         }
 
         const char *indent = field->is_optional ? "        " : "    ";
+        if (has_bitfields && !is_bitfield) {
+            sb_append(impl, "%sif (!%sbitwriter_flush(&bit_writer, buffer)) { return false; }\n", indent, schema->prefix);
+        }
 
         char field_expr[256];
         snprintf(field_expr, sizeof(field_expr), "value->%s", field->name);
@@ -1109,18 +1121,36 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
             make_prefixed(nested, sizeof(nested), schema, field->type_name);
             sb_append(impl, "%sif (!%s_encode_compact(&value->%s, buffer, schema)) { return false; }\n", indent, nested, field->name);
         } else {
-            append_scalar_encode(impl, schema, field, field_expr, indent);
+            if (is_bitfield) {
+                char ctype_buf[256];
+                const char *ctype = c_type_for(schema, field->type_name, ctype_buf, sizeof(ctype_buf), field->line);
+                char inner_indent[64];
+                snprintf(inner_indent, sizeof(inner_indent), "%s    ", indent);
+                sb_append(impl, "%s{\n", indent);
+                sb_append(impl, "%s%s bw_value;\n", indent, ctype);
+                append_bit_width_assign(impl, schema, field, field_expr, "bw_value", inner_indent);
+                sb_append(impl, "%s    if (!%sbitwriter_write(&bit_writer, buffer, (uint64_t)bw_value, %u)) { return false; }\n", indent, schema->prefix, field->bit_width);
+                sb_append(impl, "%s}\n", indent);
+            } else {
+                append_scalar_encode(impl, schema, field, field_expr, indent);
+            }
         }
 
         if (field->is_optional) {
             sb_append(impl, "    }\n");
         }
     }
+    if (has_bitfields) {
+        sb_append(impl, "    if (!%sbitwriter_flush(&bit_writer, buffer)) { return false; }\n", schema->prefix);
+    }
     sb_append(impl, "    return true;\n}\n\n");
 
     sb_append(impl, "bool %s_decode_compact(%s *value, %s *buffer, %s *memory, const %sSchemaInfo *schema) {\n", struct_name, struct_name, buffer_type, buffer_type, schema->prefix);
     sb_append(impl, "    if (!memory) { return false; }\n");
     sb_append(impl, "    memset(value, 0, sizeof(*value));\n");
+    if (has_bitfields) {
+        sb_append(impl, "    %sBitReader bit_reader = {0, 8};\n", schema->prefix);
+    }
     
     // Slow path logic
     sb_append(impl,
@@ -1152,10 +1182,15 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
         "                present = (bitmask[opt_idx / 8] >> (opt_idx %% 8)) & 1;\n"
         "                opt_idx++;\n"
         "            }\n"
-        "            printf(\"Field %%s (mapping %%d) present: %%d\\n\", type->fields[i].name, type->fields[i].mapping, present);\n"
+        , schema->prefix, def->name, schema->prefix);
+    if (has_bitfields) {
+        sb_append(impl,
+        "            if (type->fields[i].bit_width == 0) { %sbitreader_align(&bit_reader); }\n",
+        schema->prefix);
+    }
+    sb_append(impl,
         "            if (!present) continue;\n"
-        "            switch (type->fields[i].mapping) {\n",
-        schema->prefix, def->name, schema->prefix);
+        "            switch (type->fields[i].mapping) {\n");
         
     char enum_name[256];
     char tmp_name[256];
@@ -1223,7 +1258,19 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
         } else {
             char target[256];
             snprintf(target, sizeof(target), "value->%s", field->name);
-            append_scalar_decode(impl, schema, field, target, indent, NULL);
+            if (field->bit_width > 0) {
+                char inner_indent[32];
+                snprintf(inner_indent, sizeof(inner_indent), "%s    ", indent);
+                sb_append(impl,
+                    "%s{\n"
+                    "%s    uint64_t bw_raw = 0;\n"
+                    "%s    if (!%sbitreader_read(&bit_reader, buffer, %u, &bw_raw)) { return false; }\n",
+                    indent, indent, indent, schema->prefix, field->bit_width);
+                append_bit_width_assign(impl, schema, field, "bw_raw", target, inner_indent);
+                sb_append(impl, "%s}\n", indent);
+            } else {
+                append_scalar_decode(impl, schema, field, target, indent, NULL);
+            }
         }
         sb_append(impl, "                    break;\n");
         sb_append(impl, "                }\n");
@@ -1248,11 +1295,19 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
     uint32_t opt_idx = 0;
     for (size_t i = 0; i < def->field_count; ++i) {
         const FieldDef *field = &def->fields[i];
+        bool is_bitfield = field->bit_width > 0;
         
         if (field->is_optional) {
             sb_append(impl, "    value->has_%s = (bitmask[%u] >> %u) & 1u;\n", field->name, opt_idx / 8, opt_idx % 8);
+            if (has_bitfields && !is_bitfield) {
+                sb_append(impl, "    %sbitreader_align(&bit_reader);\n", schema->prefix);
+            }
             sb_append(impl, "    if (value->has_%s) {\n", field->name);
             opt_idx++;
+        } else {
+            if (has_bitfields && !is_bitfield) {
+                sb_append(impl, "    %sbitreader_align(&bit_reader);\n", schema->prefix);
+            }
         }
 
         const char *indent = field->is_optional ? "        " : "    ";
@@ -1309,7 +1364,19 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
         } else {
             char target[256];
             snprintf(target, sizeof(target), "value->%s", field->name);
-            append_scalar_decode(impl, schema, field, target, indent, NULL);
+            if (is_bitfield) {
+                char inner_indent[32];
+                snprintf(inner_indent, sizeof(inner_indent), "%s    ", indent);
+                sb_append(impl,
+                    "%s{\n"
+                    "%s    uint64_t bw_raw = 0;\n"
+                    "%s    if (!%sbitreader_read(&bit_reader, buffer, %u, &bw_raw)) { return false; }\n",
+                    indent, indent, indent, schema->prefix, field->bit_width);
+                append_bit_width_assign(impl, schema, field, "bw_raw", target, inner_indent);
+                sb_append(impl, "%s}\n", indent);
+            } else {
+                append_scalar_decode(impl, schema, field, target, indent, NULL);
+            }
         }
 
         if (field->is_optional) {
@@ -1817,6 +1884,69 @@ static void append_wire_helpers(StringBuilder *decls, StringBuilder *impl, const
 static void append_compact_helpers(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
     const char *p = schema->prefix;
     
+    sb_append(impl,
+        "typedef struct %sBitWriter {\n"
+        "    uint8_t scratch;\n"
+        "    uint8_t used_bits;\n"
+        "} %sBitWriter;\n"
+        "typedef struct %sBitReader {\n"
+        "    uint8_t scratch;\n"
+        "    uint8_t used_bits;\n"
+        "} %sBitReader;\n"
+        "bool %sbitwriter_write(%sBitWriter *bw, %sBuffer *buffer, uint64_t value, uint32_t width) {\n"
+        "    while (width) {\n"
+        "        uint32_t avail = 8u - bw->used_bits;\n"
+        "        uint32_t take = width < avail ? width : avail;\n"
+        "        uint8_t chunk_mask = (uint8_t)((UINT8_C(1) << take) - 1u);\n"
+        "        bw->scratch |= (uint8_t)((value & chunk_mask) << bw->used_bits);\n"
+        "        bw->used_bits += (uint8_t)take;\n"
+        "        value >>= take;\n"
+        "        width -= take;\n"
+        "        if (bw->used_bits == 8u) {\n"
+        "            if (!%sbuffer_write_u8(buffer, bw->scratch)) { return false; }\n"
+        "            bw->scratch = 0;\n"
+        "            bw->used_bits = 0;\n"
+        "        }\n"
+        "    }\n"
+        "    return true;\n"
+        "}\n"
+        "bool %sbitwriter_flush(%sBitWriter *bw, %sBuffer *buffer) {\n"
+        "    if (bw->used_bits == 0) { return true; }\n"
+        "    bool ok = %sbuffer_write_u8(buffer, bw->scratch);\n"
+        "    bw->scratch = 0;\n"
+        "    bw->used_bits = 0;\n"
+        "    return ok;\n"
+        "}\n"
+        "bool %sbitreader_read(%sBitReader *br, %sBuffer *buffer, uint32_t width, uint64_t *out) {\n"
+        "    uint64_t result = 0;\n"
+        "    uint32_t shift = 0;\n"
+        "    while (width) {\n"
+        "        if (br->used_bits == 8u) {\n"
+        "            if (!%sbuffer_read_u8(buffer, &br->scratch)) { return false; }\n"
+        "            br->used_bits = 0;\n"
+        "        }\n"
+        "        uint32_t avail = 8u - br->used_bits;\n"
+        "        uint32_t take = width < avail ? width : avail;\n"
+        "        uint8_t chunk_mask = (uint8_t)((UINT8_C(1) << take) - 1u);\n"
+        "        uint8_t chunk = (uint8_t)((br->scratch >> br->used_bits) & chunk_mask);\n"
+        "        result |= ((uint64_t)chunk) << shift;\n"
+        "        br->used_bits += (uint8_t)take;\n"
+        "        width -= take;\n"
+        "        shift += take;\n"
+        "    }\n"
+        "    *out = result;\n"
+        "    return true;\n"
+        "}\n"
+        "void %sbitreader_align(%sBitReader *br) {\n"
+        "    if (br->used_bits != 0 && br->used_bits < 8u) { br->used_bits = 8u; }\n"
+        "}\n\n",
+        p, p, p, p,
+        p, p, p,
+        p, p,
+        p, p, p, p,
+        p, p, p, p,
+        p, p);
+
     sb_append(impl,
         "uint32_t %szigzag32(int32_t value) {\n"
         "    return ((uint32_t)value << 1) ^ (uint32_t)(value >> 31);\n"
@@ -2605,7 +2735,7 @@ static void generate_header(const Schema *schema, const char *input_path, const 
 // --- Binary Schema Generation ---
 
 #define BINARY_MAGIC "BKIW"
-#define BINARY_VERSION 1
+#define BINARY_VERSION 2
 
 static void sb_write_u8(StringBuilder *sb, uint8_t v) {
     sb_append_bytes(sb, (char *)&v, 1);
@@ -2697,6 +2827,7 @@ static void generate_binary_schema_data(const Schema *schema, StringBuilder *sb)
             if (field->is_optional) { flags |= 2; }
             if (field->is_deprecated) { flags |= 4; }
             sb_write_u8(sb, flags);
+            sb_write_varuint(sb, field->bit_width);
         }
     }
 }
@@ -2776,6 +2907,7 @@ static void compat_parse_binary_schema(const char *path, size_t builtin_alias_co
                 f->is_array = (flags & 1) != 0;
                 f->is_optional = (flags & 2) != 0;
                 f->is_deprecated = (flags & 4) != 0;
+                f->bit_width = (uint32_t)compat_read_varuint(&cursor, end);
             }
         }
     }
@@ -2813,6 +2945,9 @@ static void check_backward_compatibility(const char *existing_path, const Schema
             if (nf->is_array != of->is_array || nf->is_optional != of->is_optional || nf->is_deprecated != of->is_deprecated) {
                 fatal("%s:%zu: incompatible change: field '%s' modifiers changed", schema->filename, nf->line, nf->name);
             }
+            if (nf->bit_width != of->bit_width) {
+                fatal("%s:%zu: incompatible change: field '%s' bit width changed (%u -> %u)", schema->filename, nf->line, nf->name, of->bit_width, nf->bit_width);
+            }
             const char *old_type_name = compat_find_type_name_by_id(&old_schema, schema->builtin_alias_count, of->type_id);
             if (!old_type_name) {
                 fatal("%s:%zu: incompatible change: field '%s' refers to unknown type id %u in existing schema", schema->filename, nf->line, nf->name, of->type_id);
@@ -2838,7 +2973,7 @@ static void check_backward_compatibility(const char *existing_path, const Schema
 static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro, const StringBuilder *bin_data) {
     // Embed binary schema
     sb_append(impl, "#define %sBINARY_MAGIC \"BKIW\"\n", schema->prefix);
-    sb_append(impl, "#define %sBINARY_VERSION 1\n\n", schema->prefix);
+    sb_append(impl, "#define %sBINARY_VERSION %d\n\n", schema->prefix, BINARY_VERSION);
     
     sb_append(impl,
         "const uint8_t %sschema_blob[] = {\n",
@@ -2855,6 +2990,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    const char *name;\n"
         "    uint32_t id;\n"
         "    uint32_t type_id;\n"
+        "    uint32_t bit_width;\n"
         "    bool is_array;\n"
         "    bool is_optional;\n"
         "    bool is_deprecated;\n"
@@ -2947,6 +3083,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "                type->fields[j].id = (uint32_t)%sread_varuint(&cursor, end);\n"
         "                type->fields[j].type_id = (uint32_t)%sread_varuint(&cursor, end);\n"
         "                uint8_t flags = *cursor++;\n"
+        "                type->fields[j].bit_width = (uint32_t)%sread_varuint(&cursor, end);\n"
         "                type->fields[j].is_array = (flags & 1) != 0;\n"
         "                type->fields[j].is_optional = (flags & 2) != 0;\n"
         "                type->fields[j].is_deprecated = (flags & 4) != 0;\n"
@@ -2974,7 +3111,6 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "            for (uint32_t k = 0; k < desc->parameter_count; ++k) {\n"
         "                if (strcmp(desc->parameters[k].name, field->name) == 0) {\n"
         "                    field->mapping = (int32_t)desc->parameters[k].parameter_id;\n"
-        "                    printf(\"Resolved field %%s to mapping %%d\\n\", field->name, field->mapping);\n"
         "                    break;\n"
         "                }\n"
         "            }\n"
@@ -2987,6 +3123,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         schema->prefix,
         schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix,
         schema->prefix, schema->prefix, schema->prefix,
+        schema->prefix,
         schema->prefix,
         schema->prefix,
         schema->prefix,
@@ -3091,9 +3228,12 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    // STRUCT\n"
         "    // Read bitmask\n"
         "    uint32_t optional_count = 0;\n"
+        "    bool has_bitfields = false;\n"
         "    for (uint32_t i = 0; i < type->field_count; ++i) {\n"
         "        if (type->fields[i].is_optional) optional_count++;\n"
+        "        if (type->fields[i].bit_width > 0) has_bitfields = true;\n"
         "    }\n"
+        "    %sBitReader bit_reader = {0, 8};\n"
         "    uint8_t *bitmask = NULL;\n"
         "    if (optional_count > 0) {\n"
         "        uint32_t bytes = (optional_count + 7) / 8;\n"
@@ -3120,30 +3260,23 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "            present = (bitmask[opt_idx / 8] >> (opt_idx % 8)) & 1;\n"
         "            opt_idx++;\n"
         "        }\n"
+        "        if (has_bitfields && type->fields[i].bit_width == 0) { %sbitreader_align(&bit_reader); }\n"
         "        if (present) {\n"
-        "            if (!%sskip_generic(buffer, type->fields[i].type_id, type->fields[i].is_array, schema)) return false;\n"
+        "            if (type->fields[i].bit_width > 0) {\n"
+        "                uint64_t tmp = 0;\n"
+        "                if (!%sbitreader_read(&bit_reader, buffer, type->fields[i].bit_width, &tmp)) return false;\n"
+        "            } else if (!%sskip_generic(buffer, type->fields[i].type_id, type->fields[i].is_array, schema)) return false;\n"
         "        }\n"
         "    }\n"
         "    return true;\n"
         "}\n\n",
         schema->prefix, schema->prefix, schema->prefix,
+        schema->prefix, schema->prefix,
         schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
+        schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix,
         schema->prefix, schema->prefix, schema->prefix,
-        schema->prefix,
+        schema->prefix, schema->prefix,
+        schema->prefix, schema->prefix, schema->prefix,
         schema->prefix,
         schema->prefix);
 }

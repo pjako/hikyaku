@@ -85,6 +85,13 @@ typedef enum gen_Class {
     gen_Class_summoner = 2,
 } gen_Class;
 
+typedef uint8_t gen_PlayerFlags;
+enum {
+    gen_PlayerFlags_isBanned = 1,
+    gen_PlayerFlags_emailConfirmed = 2,
+    gen_PlayerFlags_isAdmin = 4,
+};
+
 struct gen_ArrayAchievements {
     gen_Achievements *items;
     uint32_t count;
@@ -111,6 +118,8 @@ struct gen_PlayerState {
 struct gen_Player {
     bool has_id;
     u32 id;
+    bool has_flags;
+    gen_PlayerFlags flags;
     bool has_class;
     gen_Class class;
     bool has_colors;
@@ -143,6 +152,7 @@ typedef enum gen_type {
     gen_type_f64,
     gen_type_bool,
     gen_type_Class,
+    gen_type_PlayerFlags,
     gen_type_Achievements,
     gen_type_PlayerState,
     gen_type_Player,
@@ -181,8 +191,9 @@ typedef enum gen_playerStateParameters {
 
 typedef enum gen_playerParameters {
     gen_playerParameters_id = 1,
-    gen_playerParameters_class = 2,
-    gen_playerParameters_colors = 3,
+    gen_playerParameters_flags = 2,
+    gen_playerParameters_class = 3,
+    gen_playerParameters_colors = 4,
 } gen_playerParameters;
 
 GEN__API const gen_TypeDescription *gen_get_type_description(gen_type type_id);
@@ -202,6 +213,7 @@ typedef struct gen_SchemaField {
     const char *name;
     uint32_t id;
     uint32_t type_id;
+    uint32_t bit_width;
     bool is_array;
     bool is_optional;
     bool is_deprecated;
@@ -501,6 +513,62 @@ bool gen_skip_wire_value(gen_Buffer *buffer, gen_WireType wire) {
     }
 }
 
+typedef struct gen_BitWriter {
+    uint8_t scratch;
+    uint8_t used_bits;
+} gen_BitWriter;
+typedef struct gen_BitReader {
+    uint8_t scratch;
+    uint8_t used_bits;
+} gen_BitReader;
+bool gen_bitwriter_write(gen_BitWriter *bw, gen_Buffer *buffer, uint64_t value, uint32_t width) {
+    while (width) {
+        uint32_t avail = 8u - bw->used_bits;
+        uint32_t take = width < avail ? width : avail;
+        uint8_t chunk_mask = (uint8_t)((UINT8_C(1) << take) - 1u);
+        bw->scratch |= (uint8_t)((value & chunk_mask) << bw->used_bits);
+        bw->used_bits += (uint8_t)take;
+        value >>= take;
+        width -= take;
+        if (bw->used_bits == 8u) {
+            if (!gen_buffer_write_u8(buffer, bw->scratch)) { return false; }
+            bw->scratch = 0;
+            bw->used_bits = 0;
+        }
+    }
+    return true;
+}
+bool gen_bitwriter_flush(gen_BitWriter *bw, gen_Buffer *buffer) {
+    if (bw->used_bits == 0) { return true; }
+    bool ok = gen_buffer_write_u8(buffer, bw->scratch);
+    bw->scratch = 0;
+    bw->used_bits = 0;
+    return ok;
+}
+bool gen_bitreader_read(gen_BitReader *br, gen_Buffer *buffer, uint32_t width, uint64_t *out) {
+    uint64_t result = 0;
+    uint32_t shift = 0;
+    while (width) {
+        if (br->used_bits == 8u) {
+            if (!gen_buffer_read_u8(buffer, &br->scratch)) { return false; }
+            br->used_bits = 0;
+        }
+        uint32_t avail = 8u - br->used_bits;
+        uint32_t take = width < avail ? width : avail;
+        uint8_t chunk_mask = (uint8_t)((UINT8_C(1) << take) - 1u);
+        uint8_t chunk = (uint8_t)((br->scratch >> br->used_bits) & chunk_mask);
+        result |= ((uint64_t)chunk) << shift;
+        br->used_bits += (uint8_t)take;
+        width -= take;
+        shift += take;
+    }
+    *out = result;
+    return true;
+}
+void gen_bitreader_align(gen_BitReader *br) {
+    if (br->used_bits != 0 && br->used_bits < 8u) { br->used_bits = 8u; }
+}
+
 uint32_t gen_zigzag32(int32_t value) {
     return ((uint32_t)value << 1) ^ (uint32_t)(value >> 31);
 }
@@ -658,6 +726,7 @@ void gen_PlayerState_defaults(gen_PlayerState *value) {
 void gen_Player_defaults(gen_Player *value) {
     memset(value, 0, sizeof(*value));
     value->has_id = false;
+    value->has_flags = false;
     value->has_class = false;
     value->class = gen_Class_mage;
     value->has_colors = false;
@@ -823,6 +892,11 @@ bool gen_Player_read(gen_Player *value, gen_Buffer *buffer, gen_Buffer *memory, 
     if (!memory) { return false; }
     if (!gen_buffer_read_u32(buffer, &value->id)) { return false; }
     {
+        uint8_t raw = 0;
+        if (!gen_buffer_read_u8(buffer, &raw)) { return false; }
+        value->flags = (gen_PlayerFlags)raw;
+    }
+    {
         u32 raw = 0;
         if (!gen_buffer_read_u32(buffer, &raw)) { return false; }
         value->class = (gen_Class)raw;
@@ -834,6 +908,7 @@ bool gen_Player_read(gen_Player *value, gen_Buffer *buffer, gen_Buffer *memory, 
 bool gen_Player_write(const gen_Player *value, gen_Buffer *buffer, const gen_SchemaInfo *schema) {
     (void)schema;
     if (!gen_buffer_write_u32(buffer, value->id)) { return false; }
+    if (!gen_buffer_write_u8(buffer, (uint8_t)value->flags)) { return false; }
     if (!gen_buffer_write_u32(buffer, (u32)value->class)) { return false; }
     if (!gen_ArrayAchievements_write(&value->colors, buffer, schema)) { return false; }
     return true;
@@ -855,6 +930,7 @@ static const gen_ParameterInfo gen_PlayerState_parameters[] = {
 
 static const gen_ParameterInfo gen_Player_parameters[] = {
     { "id", gen_playerParameters_id, gen_type_u32, offsetof(gen_Player, id) },
+    { "flags", gen_playerParameters_flags, gen_type_PlayerFlags, offsetof(gen_Player, flags) },
     { "class", gen_playerParameters_class, gen_type_Class, offsetof(gen_Player, class) },
     { "colors", gen_playerParameters_colors, gen_type_ArrayAchievements, offsetof(gen_Player, colors) },
 };
@@ -862,7 +938,7 @@ static const gen_ParameterInfo gen_Player_parameters[] = {
 static const gen_TypeDescription gen_type_descriptions[] = {
     { "Achievements", gen_type_Achievements, sizeof(gen_Achievements), sizeof(gen_Achievements), gen_Achievements_parameters, 4 },
     { "PlayerState", gen_type_PlayerState, sizeof(gen_PlayerState), sizeof(gen_PlayerState), gen_PlayerState_parameters, 4 },
-    { "Player", gen_type_Player, sizeof(gen_Player), sizeof(gen_Player), gen_Player_parameters, 3 },
+    { "Player", gen_type_Player, sizeof(gen_Player), sizeof(gen_Player), gen_Player_parameters, 4 },
 };
 
 const gen_TypeDescription *gen_get_type_description(gen_type type_id) {
@@ -911,7 +987,6 @@ bool gen_Achievements_decode_compact(gen_Achievements *value, gen_Buffer *buffer
                 present = (bitmask[opt_idx / 8] >> (opt_idx % 8)) & 1;
                 opt_idx++;
             }
-            printf("Field %s (mapping %d) present: %d\n", type->fields[i].name, type->fields[i].mapping, present);
             if (!present) continue;
             switch (type->fields[i].mapping) {
                 case gen_achievementsParameters_red: {
@@ -965,54 +1040,57 @@ bool gen_PlayerState_encode_compact(const gen_PlayerState *value, gen_Buffer *bu
     if (value->has_posY) { bitmask[0] |= (1u << 2); }
     if (value->has_posZ) { bitmask[0] |= (1u << 3); }
     if (!gen_buffer_write_bytes(buffer, bitmask, sizeof(bitmask))) { return false; }
+    gen_BitWriter bit_writer = {0, 0};
     if (value->has_yaw) {
         {
-            u32 bw_value;
+        u32 bw_value;
             const uint64_t mask = ((UINT64_C(1) << 10) - UINT64_C(1));
             uint64_t masked = ((uint64_t)(value->yaw)) & mask;
             bw_value = (u32)masked;
-            if (!gen_write_var_u32(buffer, (uint32_t)bw_value)) { return false; }
+            if (!gen_bitwriter_write(&bit_writer, buffer, (uint64_t)bw_value, 10)) { return false; }
         }
     }
     if (value->has_posX) {
         {
-            i32 bw_value;
+        i32 bw_value;
             const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
             uint64_t masked = ((uint64_t)(value->posX)) & mask;
             const uint64_t sign_bit = UINT64_C(1) << 19;
             if (masked & sign_bit) { masked |= ~mask; }
             bw_value = (i32)masked;
-            if (!gen_write_var_s32(buffer, (int32_t)bw_value)) { return false; }
+            if (!gen_bitwriter_write(&bit_writer, buffer, (uint64_t)bw_value, 20)) { return false; }
         }
     }
     if (value->has_posY) {
         {
-            i32 bw_value;
+        i32 bw_value;
             const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
             uint64_t masked = ((uint64_t)(value->posY)) & mask;
             const uint64_t sign_bit = UINT64_C(1) << 19;
             if (masked & sign_bit) { masked |= ~mask; }
             bw_value = (i32)masked;
-            if (!gen_write_var_s32(buffer, (int32_t)bw_value)) { return false; }
+            if (!gen_bitwriter_write(&bit_writer, buffer, (uint64_t)bw_value, 20)) { return false; }
         }
     }
     if (value->has_posZ) {
         {
-            i32 bw_value;
+        i32 bw_value;
             const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
             uint64_t masked = ((uint64_t)(value->posZ)) & mask;
             const uint64_t sign_bit = UINT64_C(1) << 19;
             if (masked & sign_bit) { masked |= ~mask; }
             bw_value = (i32)masked;
-            if (!gen_write_var_s32(buffer, (int32_t)bw_value)) { return false; }
+            if (!gen_bitwriter_write(&bit_writer, buffer, (uint64_t)bw_value, 20)) { return false; }
         }
     }
+    if (!gen_bitwriter_flush(&bit_writer, buffer)) { return false; }
     return true;
 }
 
 bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema) {
     if (!memory) { return false; }
     memset(value, 0, sizeof(*value));
+    gen_BitReader bit_reader = {0, 8};
     if (schema) {
         const gen_SchemaType *type = NULL;
         for (uint32_t i = 0; i < schema->type_count; ++i) {
@@ -1041,20 +1119,16 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
                 present = (bitmask[opt_idx / 8] >> (opt_idx % 8)) & 1;
                 opt_idx++;
             }
-            printf("Field %s (mapping %d) present: %d\n", type->fields[i].name, type->fields[i].mapping, present);
+            if (type->fields[i].bit_width == 0) { gen_bitreader_align(&bit_reader); }
             if (!present) continue;
             switch (type->fields[i].mapping) {
                 case gen_playerStateParameters_yaw: {
                     value->has_yaw = true;
                     {
-                        u32 bw_value;
-                        {
-                            uint32_t tmp = 0;
-                            if (!gen_read_var_u32(buffer, &tmp)) { return false; }
-                            bw_value = (uint32_t)tmp;
-                        }
+                        uint64_t bw_raw = 0;
+                        if (!gen_bitreader_read(&bit_reader, buffer, 10, &bw_raw)) { return false; }
                         const uint64_t mask = ((UINT64_C(1) << 10) - UINT64_C(1));
-                        uint64_t masked = ((uint64_t)(bw_value)) & mask;
+                        uint64_t masked = ((uint64_t)(bw_raw)) & mask;
                         value->yaw = (u32)masked;
                     }
                     break;
@@ -1062,14 +1136,10 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
                 case gen_playerStateParameters_posX: {
                     value->has_posX = true;
                     {
-                        i32 bw_value;
-                        {
-                            int32_t tmp = 0;
-                            if (!gen_read_var_s32(buffer, &tmp)) { return false; }
-                            bw_value = (int32_t)tmp;
-                        }
+                        uint64_t bw_raw = 0;
+                        if (!gen_bitreader_read(&bit_reader, buffer, 20, &bw_raw)) { return false; }
                         const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
-                        uint64_t masked = ((uint64_t)(bw_value)) & mask;
+                        uint64_t masked = ((uint64_t)(bw_raw)) & mask;
                         const uint64_t sign_bit = UINT64_C(1) << 19;
                         if (masked & sign_bit) { masked |= ~mask; }
                         value->posX = (i32)masked;
@@ -1079,14 +1149,10 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
                 case gen_playerStateParameters_posY: {
                     value->has_posY = true;
                     {
-                        i32 bw_value;
-                        {
-                            int32_t tmp = 0;
-                            if (!gen_read_var_s32(buffer, &tmp)) { return false; }
-                            bw_value = (int32_t)tmp;
-                        }
+                        uint64_t bw_raw = 0;
+                        if (!gen_bitreader_read(&bit_reader, buffer, 20, &bw_raw)) { return false; }
                         const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
-                        uint64_t masked = ((uint64_t)(bw_value)) & mask;
+                        uint64_t masked = ((uint64_t)(bw_raw)) & mask;
                         const uint64_t sign_bit = UINT64_C(1) << 19;
                         if (masked & sign_bit) { masked |= ~mask; }
                         value->posY = (i32)masked;
@@ -1096,14 +1162,10 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
                 case gen_playerStateParameters_posZ: {
                     value->has_posZ = true;
                     {
-                        i32 bw_value;
-                        {
-                            int32_t tmp = 0;
-                            if (!gen_read_var_s32(buffer, &tmp)) { return false; }
-                            bw_value = (int32_t)tmp;
-                        }
+                        uint64_t bw_raw = 0;
+                        if (!gen_bitreader_read(&bit_reader, buffer, 20, &bw_raw)) { return false; }
                         const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
-                        uint64_t masked = ((uint64_t)(bw_value)) & mask;
+                        uint64_t masked = ((uint64_t)(bw_raw)) & mask;
                         const uint64_t sign_bit = UINT64_C(1) << 19;
                         if (masked & sign_bit) { masked |= ~mask; }
                         value->posZ = (i32)masked;
@@ -1123,28 +1185,20 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
     value->has_yaw = (bitmask[0] >> 0) & 1u;
     if (value->has_yaw) {
         {
-            u32 bw_value;
-            {
-                uint32_t tmp = 0;
-                if (!gen_read_var_u32(buffer, &tmp)) { return false; }
-                bw_value = (uint32_t)tmp;
-            }
+            uint64_t bw_raw = 0;
+            if (!gen_bitreader_read(&bit_reader, buffer, 10, &bw_raw)) { return false; }
             const uint64_t mask = ((UINT64_C(1) << 10) - UINT64_C(1));
-            uint64_t masked = ((uint64_t)(bw_value)) & mask;
+            uint64_t masked = ((uint64_t)(bw_raw)) & mask;
             value->yaw = (u32)masked;
         }
     }
     value->has_posX = (bitmask[0] >> 1) & 1u;
     if (value->has_posX) {
         {
-            i32 bw_value;
-            {
-                int32_t tmp = 0;
-                if (!gen_read_var_s32(buffer, &tmp)) { return false; }
-                bw_value = (int32_t)tmp;
-            }
+            uint64_t bw_raw = 0;
+            if (!gen_bitreader_read(&bit_reader, buffer, 20, &bw_raw)) { return false; }
             const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
-            uint64_t masked = ((uint64_t)(bw_value)) & mask;
+            uint64_t masked = ((uint64_t)(bw_raw)) & mask;
             const uint64_t sign_bit = UINT64_C(1) << 19;
             if (masked & sign_bit) { masked |= ~mask; }
             value->posX = (i32)masked;
@@ -1153,14 +1207,10 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
     value->has_posY = (bitmask[0] >> 2) & 1u;
     if (value->has_posY) {
         {
-            i32 bw_value;
-            {
-                int32_t tmp = 0;
-                if (!gen_read_var_s32(buffer, &tmp)) { return false; }
-                bw_value = (int32_t)tmp;
-            }
+            uint64_t bw_raw = 0;
+            if (!gen_bitreader_read(&bit_reader, buffer, 20, &bw_raw)) { return false; }
             const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
-            uint64_t masked = ((uint64_t)(bw_value)) & mask;
+            uint64_t masked = ((uint64_t)(bw_raw)) & mask;
             const uint64_t sign_bit = UINT64_C(1) << 19;
             if (masked & sign_bit) { masked |= ~mask; }
             value->posY = (i32)masked;
@@ -1169,14 +1219,10 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
     value->has_posZ = (bitmask[0] >> 3) & 1u;
     if (value->has_posZ) {
         {
-            i32 bw_value;
-            {
-                int32_t tmp = 0;
-                if (!gen_read_var_s32(buffer, &tmp)) { return false; }
-                bw_value = (int32_t)tmp;
-            }
+            uint64_t bw_raw = 0;
+            if (!gen_bitreader_read(&bit_reader, buffer, 20, &bw_raw)) { return false; }
             const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
-            uint64_t masked = ((uint64_t)(bw_value)) & mask;
+            uint64_t masked = ((uint64_t)(bw_raw)) & mask;
             const uint64_t sign_bit = UINT64_C(1) << 19;
             if (masked & sign_bit) { masked |= ~mask; }
             value->posZ = (i32)masked;
@@ -1201,6 +1247,10 @@ bool gen_Player_encode_compact(const gen_Player *value, gen_Buffer *buffer, cons
     if (true) {
         if (!gen_write_wire_tag(buffer, gen_playerParameters_id, gen_WireType_Varint)) { return false; }
         if (!gen_write_var_u32(buffer, (uint32_t)value->id)) { return false; }
+    }
+    if (true) {
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_flags, gen_WireType_Varint)) { return false; }
+        if (!gen_buffer_write_u8(buffer, value->flags)) { return false; }
     }
     if (true) {
         if (!gen_write_wire_tag(buffer, gen_playerParameters_class, gen_WireType_Varint)) { return false; }
@@ -1235,6 +1285,10 @@ bool gen_Player_decode_compact(gen_Player *value, gen_Buffer *buffer, gen_Buffer
                     if (!gen_read_var_u32(buffer, &tmp)) { return false; }
                     value->id = (uint32_t)tmp;
                 }
+                break;
+            }
+            case gen_playerParameters_flags: {
+                if (!gen_buffer_read_u8(buffer, &value->flags)) { return false; }
                 break;
             }
             case gen_playerParameters_class: {
@@ -1290,20 +1344,22 @@ bool gen_Player_skip_compact(gen_Buffer *buffer) {
 }
 
 #define gen_BINARY_MAGIC "BKIW"
-#define gen_BINARY_VERSION 1
+#define gen_BINARY_VERSION 2
 
 const uint8_t gen_schema_blob[] = {
 
-    0x42, 0x4b, 0x49, 0x57, 0x01, 0x04, 0x43, 0x6c, 0x61, 0x73, 0x73, 0x00, 0x00, 0x0b, 0x00, 0x41, 
-    0x63, 0x68, 0x69, 0x65, 0x76, 0x65, 0x6d, 0x65, 0x6e, 0x74, 0x73, 0x00, 0x01, 0x0c, 0x04, 0x72, 
-    0x65, 0x64, 0x00, 0x00, 0x00, 0x00, 0x67, 0x72, 0x65, 0x65, 0x6e, 0x00, 0x01, 0x00, 0x00, 0x62, 
-    0x6c, 0x75, 0x65, 0x00, 0x02, 0x00, 0x00, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x00, 0x03, 0x00, 0x00, 
-    0x50, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x53, 0x74, 0x61, 0x74, 0x65, 0x00, 0x01, 0x0d, 0x04, 0x79, 
-    0x61, 0x77, 0x00, 0x00, 0x02, 0x02, 0x70, 0x6f, 0x73, 0x58, 0x00, 0x01, 0x06, 0x02, 0x70, 0x6f, 
-    0x73, 0x59, 0x00, 0x02, 0x06, 0x02, 0x70, 0x6f, 0x73, 0x5a, 0x00, 0x03, 0x06, 0x02, 0x50, 0x6c, 
-    0x61, 0x79, 0x65, 0x72, 0x00, 0x02, 0x0e, 0x03, 0x69, 0x64, 0x00, 0x01, 0x02, 0x00, 0x63, 0x6c, 
-    0x61, 0x73, 0x73, 0x00, 0x02, 0x0b, 0x00, 0x63, 0x6f, 0x6c, 0x6f, 0x72, 0x73, 0x00, 0x03, 0x0c, 
-    0x01, 
+    0x42, 0x4b, 0x49, 0x57, 0x02, 0x05, 0x43, 0x6c, 0x61, 0x73, 0x73, 0x00, 0x00, 0x0b, 0x00, 0x50, 
+    0x6c, 0x61, 0x79, 0x65, 0x72, 0x46, 0x6c, 0x61, 0x67, 0x73, 0x00, 0x00, 0x0c, 0x00, 0x41, 0x63, 
+    0x68, 0x69, 0x65, 0x76, 0x65, 0x6d, 0x65, 0x6e, 0x74, 0x73, 0x00, 0x01, 0x0d, 0x04, 0x72, 0x65, 
+    0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x67, 0x72, 0x65, 0x65, 0x6e, 0x00, 0x01, 0x00, 0x00, 0x00, 
+    0x62, 0x6c, 0x75, 0x65, 0x00, 0x02, 0x00, 0x00, 0x00, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x00, 0x03, 
+    0x00, 0x00, 0x00, 0x50, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x53, 0x74, 0x61, 0x74, 0x65, 0x00, 0x01, 
+    0x0e, 0x04, 0x79, 0x61, 0x77, 0x00, 0x00, 0x02, 0x02, 0x0a, 0x70, 0x6f, 0x73, 0x58, 0x00, 0x01, 
+    0x06, 0x02, 0x14, 0x70, 0x6f, 0x73, 0x59, 0x00, 0x02, 0x06, 0x02, 0x14, 0x70, 0x6f, 0x73, 0x5a, 
+    0x00, 0x03, 0x06, 0x02, 0x14, 0x50, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x00, 0x02, 0x0f, 0x04, 0x69, 
+    0x64, 0x00, 0x01, 0x02, 0x00, 0x00, 0x66, 0x6c, 0x61, 0x67, 0x73, 0x00, 0x02, 0x0c, 0x00, 0x00, 
+    0x63, 0x6c, 0x61, 0x73, 0x73, 0x00, 0x03, 0x0b, 0x00, 0x00, 0x63, 0x6f, 0x6c, 0x6f, 0x72, 0x73, 
+    0x00, 0x04, 0x0d, 0x01, 0x00, 
 };
 
 static const char *gen_read_strz(const uint8_t **cursor, const uint8_t *end) {
@@ -1357,6 +1413,7 @@ const gen_SchemaInfo *gen_parse_schema(const uint8_t *data, size_t size, gen_Buf
                 type->fields[j].id = (uint32_t)gen_read_varuint(&cursor, end);
                 type->fields[j].type_id = (uint32_t)gen_read_varuint(&cursor, end);
                 uint8_t flags = *cursor++;
+                type->fields[j].bit_width = (uint32_t)gen_read_varuint(&cursor, end);
                 type->fields[j].is_array = (flags & 1) != 0;
                 type->fields[j].is_optional = (flags & 2) != 0;
                 type->fields[j].is_deprecated = (flags & 4) != 0;
@@ -1384,7 +1441,6 @@ const gen_SchemaInfo *gen_parse_schema(const uint8_t *data, size_t size, gen_Buf
             for (uint32_t k = 0; k < desc->parameter_count; ++k) {
                 if (strcmp(desc->parameters[k].name, field->name) == 0) {
                     field->mapping = (int32_t)desc->parameters[k].parameter_id;
-                    printf("Resolved field %s to mapping %d\n", field->name, field->mapping);
                     break;
                 }
             }
@@ -1480,9 +1536,12 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
     // STRUCT
     // Read bitmask
     uint32_t optional_count = 0;
+    bool has_bitfields = false;
     for (uint32_t i = 0; i < type->field_count; ++i) {
         if (type->fields[i].is_optional) optional_count++;
+        if (type->fields[i].bit_width > 0) has_bitfields = true;
     }
+    gen_BitReader bit_reader = {0, 8};
     uint8_t *bitmask = NULL;
     if (optional_count > 0) {
         uint32_t bytes = (optional_count + 7) / 8;
@@ -1509,8 +1568,12 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
             present = (bitmask[opt_idx / 8] >> (opt_idx        )) & 1;
             opt_idx++;
         }
+        if (has_bitfields && type->fields[i].bit_width == 0) { gen_bitreader_align(&bit_reader); }
         if (present) {
-            if (!gen_skip_generic(buffer, type->fields[i].type_id, type->fields[i].is_array, schema)) return false;
+            if (type->fields[i].bit_width > 0) {
+                uint64_t tmp = 0;
+                if (!gen_bitreader_read(&bit_reader, buffer, type->fields[i].bit_width, &tmp)) return false;
+            } else if (!gen_skip_generic(buffer, type->fields[i].type_id, type->fields[i].is_array, schema)) return false;
         }
     }
     return true;
