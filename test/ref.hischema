@@ -1,0 +1,31 @@
+prefix gen_
+type i32 i32
+type u32 u32
+type f32 f32
+
+enum shapeType : u32 {
+  flat = 0,
+  round = 1,
+  pointed = 2
+}
+
+struct Color {
+  u8 red;
+  u8 green;
+  u8 blue;
+  u8 alpha;
+}
+
+struct EntityState {
+  u32 id;
+  u32 yaw : 10;
+  i32 posX? : 20;
+  i32 posY? : 20;
+}
+
+message Example {
+  id = 1; // this needs to defined in every message, it is by default uint32_t
+  shapeType type = .round;
+  // Array in C looks like this typedef struct <prefix>ArrayColor {Color* items; uint32_t count;} <prefix>ArrayColor;
+  Color[] colors; 
+}

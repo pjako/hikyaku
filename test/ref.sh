@@ -1,0 +1,1 @@
+clang -o schema_gen ../schema_gen.c && ./schema_gen ref.hischema ref.h && clang -o ref ref.c && ./ref
