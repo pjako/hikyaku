@@ -1784,7 +1784,7 @@ static void append_compact_helpers(StringBuilder *decls, StringBuilder *impl, co
         "    return %sbuffer_read_bytes(buffer, out, sizeof(*out));\n"
         "#endif\n"
         "}\n",
-        p, p, p, p, p, p, p, p, p, p, p, p, p, p, p);
+        p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p);
 
     sb_append(impl,
         "bool %swrite_compact_f64(%sBuffer *buffer, double value) {\n"
@@ -2490,11 +2490,11 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         schema->prefix, schema->prefix, schema->prefix);
 
     sb_append(decls,
-        "typedef struct %sSchemaInfo {\n"
+        "struct %sSchemaInfo {\n"
         "    %sSchemaType *types;\n"
         "    uint32_t type_count;\n"
-        "} %sSchemaInfo;\n\n",
-        schema->prefix, schema->prefix, schema->prefix);
+        "};\n\n",
+        schema->prefix, schema->prefix);
 
     // Parse Function Declaration
     sb_append(decls, "%s const %sSchemaInfo *%sparse_schema(const uint8_t *data, size_t size, %sBuffer *allocator);\n",
