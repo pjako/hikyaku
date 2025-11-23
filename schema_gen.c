@@ -373,6 +373,7 @@ typedef struct {
     size_t line;
     uint32_t bit_width;
     bool is_optional;
+    bool is_deprecated;
 } FieldDef;
 
 typedef struct {
@@ -580,6 +581,18 @@ static void parse_enum(Parser *p, Schema *schema) {
 }
 
 static FieldDef parse_struct_field(Parser *p, Schema *schema, StructKind kind) {
+    bool is_deprecated = false;
+    while (parser_match(p, TOKEN_LBRACKET)) {
+        Token attr = parser_next(p);
+        if (attr.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected attribute identifier", p->lexer.filename, attr.line); }
+        if (token_equals(&attr, "deprecated")) {
+            is_deprecated = true;
+        } else {
+            fatal("%s:%zu: error: unknown attribute '%.*s'", p->lexer.filename, attr.line, (int)(attr.end - attr.start), attr.start);
+        }
+        parser_expect(p, TOKEN_RBRACKET, "expected ']' after attribute");
+    }
+
     Token first = parser_next(p);
     if (first.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier in struct body", p->lexer.filename, first.line); }
     if (kind == STRUCT_KIND_MESSAGE && token_equals(&first, "id")) {
@@ -592,6 +605,7 @@ static FieldDef parse_struct_field(Parser *p, Schema *schema, StructKind kind) {
         field.type_name = str_dup("id32");
         field.is_array = false;
         field.def = field_default_number((int64_t)token_to_uint64(&value_tok));
+        field.is_deprecated = is_deprecated;
         return field;
     }
     Token type_tok = first;
@@ -637,6 +651,7 @@ static FieldDef parse_struct_field(Parser *p, Schema *schema, StructKind kind) {
     field.line = type_tok.line;
     field.bit_width = bit_width;
     field.is_optional = is_optional;
+    field.is_deprecated = is_deprecated;
     if (field.is_array) {
         if (bit_width > 0) { fatal("%s:%zu: error: arrays cannot have bit width", p->lexer.filename, type_tok.line); }
         schema_add_array(schema, field.type_name, field.line);
@@ -1863,6 +1878,10 @@ static void append_array_defs(StringBuilder *out, const Schema *schema) {
 }
 
 static void append_struct_defs(StringBuilder *out, const Schema *schema) {
+    char deprecated_macro[256];
+    to_upper_str(deprecated_macro, sizeof(deprecated_macro), schema->prefix);
+    strncat(deprecated_macro, "DEPRECATED", sizeof(deprecated_macro) - strlen(deprecated_macro) - 1);
+
     for (size_t i = 0; i < schema->struct_count; ++i) {
         const StructDef *def = &schema->structs[i];
         char struct_name[256];
@@ -1879,13 +1898,16 @@ static void append_struct_defs(StringBuilder *out, const Schema *schema) {
             if (field->is_array) {
                 char array_name[256];
                 make_array_name(array_name, sizeof(array_name), schema, field->type_name);
-                sb_append(out, "    %s %s;\n", array_name, field->name);
+                sb_append(out, "    %s %s", array_name, field->name);
+                if (field->is_deprecated) { sb_append(out, " %s(\"deprecated\")", deprecated_macro); }
+                sb_append(out, ";\n");
             } else {
                 const char *ctype = c_type_for(schema, field->type_name, buf, sizeof(buf), field->line);
                 sb_append(out, "    %s %s", ctype, field->name);
                 if (field->bit_width > 0) {
                     sb_append(out, " : %u", field->bit_width);
                 }
+                if (field->is_deprecated) { sb_append(out, " %s(\"deprecated\")", deprecated_macro); }
                 sb_append(out, ";\n");
             }
         }
@@ -2294,6 +2316,16 @@ static void generate_header(const Schema *schema, const char *input_path, const 
         api_macro, static_macro, api_macro, api_macro);
 
     sb_append(&out,
+        "#ifndef %sDEPRECATED\n"
+        "#  if defined(__GNUC__) || defined(__clang__)\n"
+        "#    define %sDEPRECATED(msg) __attribute__((deprecated(msg)))\n"
+        "#  else\n"
+        "#    define %sDEPRECATED(msg)\n"
+        "#  endif\n"
+        "#endif\n\n",
+        prefix_upper, prefix_upper, prefix_upper);
+
+    sb_append(&out,
         "#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__\n"
         "#  define %s_IS_BIG_ENDIAN 1\n"
         "#elif defined(__BIG_ENDIAN__)\n"
@@ -2448,6 +2480,7 @@ static void generate_binary_schema_data(const Schema *schema, StringBuilder *sb)
             uint8_t flags = 0;
             if (field->is_array) { flags |= 1; }
             if (field->is_optional) { flags |= 2; }
+            if (field->is_deprecated) { flags |= 4; }
             sb_write_u8(sb, flags);
         }
     }
@@ -2475,6 +2508,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    uint32_t type_id;\n"
         "    bool is_array;\n"
         "    bool is_optional;\n"
+        "    bool is_deprecated;\n"
         "    int32_t mapping;\n"
         "} %sSchemaField;\n\n",
         schema->prefix, schema->prefix);
@@ -2491,6 +2525,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
 
     sb_append(decls,
         "struct %sSchemaInfo {\n"
+        "    uint8_t version;\n"
         "    %sSchemaType *types;\n"
         "    uint32_t type_count;\n"
         "};\n\n",
@@ -2500,6 +2535,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
     sb_append(decls, "%s const %sSchemaInfo *%sparse_schema(const uint8_t *data, size_t size, %sBuffer *allocator);\n",
         api_macro, schema->prefix, schema->prefix, schema->prefix);
     
+    sb_append(decls, "%s const uint8_t *%sget_schema_blob(size_t *out_size);\n", api_macro, schema->prefix);
     sb_append(decls, "%s const %sSchemaInfo *%sget_embedded_schema(%sBuffer *allocator);\n",
         api_macro, schema->prefix, schema->prefix, schema->prefix);
     
@@ -2542,6 +2578,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    uint64_t count = %sread_varuint(&cursor, end);\n"
         "    %sSchemaInfo *info = (%sSchemaInfo *)%sbuffer_push_aligned(allocator, sizeof(%sSchemaInfo), sizeof(void*));\n"
         "    if (!info) return NULL;\n"
+        "    info->version = version;\n"
         "    info->type_count = (uint32_t)count;\n"
         "    info->types = (%sSchemaType *)%sbuffer_push_aligned(allocator, sizeof(%sSchemaType) * count, sizeof(void*));\n"
         "    if (!info->types) return NULL;\n"
@@ -2563,6 +2600,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "                uint8_t flags = *cursor++;\n"
         "                type->fields[j].is_array = (flags & 1) != 0;\n"
         "                type->fields[j].is_optional = (flags & 2) != 0;\n"
+        "                type->fields[j].is_deprecated = (flags & 4) != 0;\n"
         "                type->fields[j].mapping = -1;\n"
         "            }\n"
         "        } else {\n"
@@ -2609,6 +2647,13 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         schema->prefix,
         schema->prefix,
         schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix);
+
+    sb_append(impl,
+        "const uint8_t *%sget_schema_blob(size_t *out_size) {\n"
+        "    if (out_size) { *out_size = sizeof(%sschema_blob); }\n"
+        "    return %sschema_blob;\n"
+        "}\n\n",
+        schema->prefix, schema->prefix, schema->prefix);
 
     sb_append(impl,
         "const %sSchemaInfo *%sget_embedded_schema(%sBuffer *allocator) {\n"
