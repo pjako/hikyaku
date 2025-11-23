@@ -20,8 +20,8 @@ The program is intentionally freestanding—no libraries beyond the C runtime ar
 ```
 
 This emits:
-1. `output.h` – the generated header (definitions + optional implementation when `SCHEMA_PREFIX_IMPLEMENTATION` is defined).
-2. `output.hibinschema` – a compact binary schema that mirrors the textual schema. It can be parsed at runtime via `prefixparse_schema` or embedded through helper APIs.
+1. `output.h` – the generated header (definitions + optional implementation when `PREFIX_IMPLEMENTATION` is defined).
+2. `output.hibinschema` – a compact binary schema that mirrors the textual schema. It can be parsed at runtime via `parse_schema` or embedded through helper APIs.
 
 By default the generator will **refuse to overwrite** an existing `output.hibinschema` if it detects backwards-incompatible changes (e.g., enum/struct removal, changing field types/flags/ids). Pass `--ignore-compat` to skip this guard when you intentionally break compatibility.
 
@@ -43,26 +43,78 @@ The `.cm` language is kept deliberately small:
 | `prefix foo_` | Sets the C symbol prefix (`foo_` by default). |
 | `type logical u32` | Adds/replaces a type alias that maps schema names to C types. |
 | `enum Color { red, green, blue=5 }` | Declares enums (optional base type via `enum Kind : u16`). |
+| `bitset Flags : u16 { a, b=4, c }` | Declares a flag set with single-bit values on an unsigned base (u8/u16/u32/u64). |
 | `struct Packet { ... }` | Declares POD structs encoded compactly. |
 | `message Ping { ... }` | Similar to `struct`, but when encoded in Standard mode each field is tagged (`id = N` fields reserve IDs). |
 
 Within structs/messages:
 - Arrays: `u8[] payload;`
 - Optional fields: `u32 checksum?;` (encoded via leading bitmask).
-- Bitfields: `u16 flags : 4;` (read/write as scalars, stored in bitfield slots when emitted).
+- Bit-width hints: `u16 flags : 4;` (declares a C bitfield; in compact encoding these bit-width scalars are packed LSB-first and padded to the next byte before the next non-bit-width field; Standard encoding still masks then writes the full scalar varint).
 - Defaults: `u8 version = 1;` or enum defaults `Mode mode = ACTIVE;`.
 
 Messages automatically synthesize an `id` field when `id = <number>;` appears inside the definition.
 
+Bit-width annotations now affect both the generated C struct layout and compact wire format: consecutive bit-width scalars are appended bit-by-bit (LSB-first), then padded to the next byte boundary before any following non-bit-width field or at struct end. Optional fields still use the leading presence bitmask, and arrays cannot specify bit widths.
+
+## Example Schema (feature tour)
+Below is a compact `.cm` file that exercises the language surface—prefixing, aliases, enums with explicit bases, structs vs. messages, optionals, arrays, bitfields, and defaults:
+
+```cm
+// example.cm
+prefix courier_
+
+// Remap schema names to C types used in your codebase
+type handle u32
+type coord i32
+
+enum Status : u8 {
+  ok = 0,
+  busy = 3,
+  gone = 9
+}
+
+struct Attachment {
+  u32 size_bytes;
+  u8 bytes[];
+}
+
+struct Parcel {
+  handle id;
+  Status state = .ok; // enum default (dotted or bare name is fine)
+  coord x;
+  coord y;
+  coord z? : 20;      // optional C bitfield; compact encoding packs 20 bits and pads before the next field
+  u16 flags : 4;      // bitfield in the struct layout; packed alongside other bit-width fields in compact mode
+  u8 tags[];          // arrays get a count + items
+  Attachment extra?;  // optional nested struct
+  u32 checksum?;
+}
+
+bitset Access : u8 {
+  read,               // 1 << 0
+  write,              // 1 << 1
+  execute = 1 << 3    // custom bit value is allowed but must be a single bit
+}
+
+message Envelope {
+  u32 sequence = 1;   // defaults apply to messages too (Standard encoding)
+  Parcel body;        // structs nested inside messages use Compact encoding
+  u8 signature[];
+}
+```
+
+Generate the corresponding C99 API and binary schema with `./schema_gen example.cm example.h`; the emitted symbols will be prefixed with `courier_`.
+
 ## Generated Header Layout
 The header stitches several pieces together (guarded by feature macros derived from your prefix, e.g. `GEN_`):
 
-1. **Buffer utilities**: `prefixBuffer` plus aligned push/pop helpers to treat caller-provided memory as arenas.
+1. **Buffer utilities**: `Buffer` plus aligned push/pop helpers to treat caller-provided memory as arenas.
 2. **Wire helpers**: Varint encoders, ZigZag helpers, compact floating-point encoding, and Protobuf-like wire tag readers/writers.
-3. **Type declarations**: Forward declarations followed by enums, arrays, structs, and their default initializers (`prefixFoo_defaults`).
+3. **Type declarations**: Forward declarations followed by enums, arrays, structs, and their default initializers (`Foo_defaults`).
 4. **I/O helpers**: `read`/`write` routines for every array/struct plus `*_encode_compact`, `*_decode_compact`, and `*_skip_compact`.
-5. **Metadata**: Generated `TypeDescription` and `ParameterInfo` tables (exposed via `prefixget_type_description`) that make offsets and field IDs available at runtime.
-6. **Runtime schema**: Embedded binary schema blob, parsing helpers (`prefixparse_schema`, `prefixget_embedded_schema`), and `prefixskip_generic` for schema-driven skipping when introspecting encoded streams.
+5. **Metadata**: Generated `TypeDescription` and `ParameterInfo` tables (exposed via `get_type_description`) that make offsets and field IDs available at runtime.
+6. **Runtime schema**: Embedded binary schema blob, parsing helpers (`parse_schema`, `get_embedded_schema`), and `skip_generic` for schema-driven skipping when introspecting encoded streams.
 
 Including the header with `PREFIX_IMPLEMENTATION` defined appends the implementation block right after the declarations, keeping integration simple.
 
@@ -78,6 +130,7 @@ The top of `schema_gen.c` documents both encodings. In practice:
 - Structs are emitted field-by-field without tags.
 - Optional fields share a leading bitmask (`ceil(optional_fields / 8)` bytes).
 - Scalars use varints, ZigZag, or compact floats (`flag byte + payload`) depending on type.
+- Bit-width scalars are bit-packed LSB-first; padding is inserted to the next byte before any non-bit-width field.
 - Arrays encode a count followed by the items (recursively encoded).
 - Perfect for deterministic packet layouts or bandwidth-sensitive transports.
 
@@ -87,20 +140,14 @@ The generated `*_encode_compact`, `*_decode_compact`, and `*_skip_compact` helpe
 To introspect schemas at runtime (e.g. for tooling, validation, or “slow path” decoding against arbitrary blobs):
 
 ```c
-prefixBuffer arena;
+Buffer arena;
 uint8_t storage[4096];
-prefixbuffer_init(&arena, storage, sizeof(storage));
+buffer_init(&arena, storage, sizeof(storage));
 
-const prefixSchemaInfo *info = prefixget_embedded_schema(&arena);
+const SchemaInfo *info = get_embedded_schema(&arena);
 ```
 
-`prefixSchemaInfo` exposes every type, its fields, and flags (array/optional). `prefixskip_generic` can use those descriptions to skip unfamiliar fields safely when a runtime schema accompanies the data stream.
-
-## Tips
-- Always zero and initialize structs via the generated `prefixFoo_defaults` before mutating.
-- When decoding arrays/structs, pass a scratch `prefixBuffer` arena to hold nested allocations.
-- To extend built-in aliases, use repeated `type` statements; redefining a type updates the mapping.
-- The tool emits human-readable errors (`schema_gen: line ...`) for malformed schemas.
+`SchemaInfo` exposes every type, its fields, and flags (array/optional). `skip_generic` can use those descriptions to skip unfamiliar fields safely when a runtime schema accompanies the data stream.
 
 ## License
 Released under the Unlicense (public domain dedication). See `LICENSE` or the header comment in `schema_gen.c` for details. Attribution is appreciated but not required.

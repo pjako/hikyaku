@@ -721,7 +721,9 @@ bool gen_PlayerState_read(gen_PlayerState *value, gen_Buffer *buffer, gen_Buffer
         {
             u32 temp;
             if (!gen_buffer_read_u32(buffer, &temp)) { return false; }
-            value->yaw = temp;
+            const uint64_t mask = ((UINT64_C(1) << 10) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(temp)) & mask;
+            value->yaw = (u32)masked;
         }
     }
     value->has_posX = (bitmask[0] >> 1) & 1u;
@@ -729,7 +731,11 @@ bool gen_PlayerState_read(gen_PlayerState *value, gen_Buffer *buffer, gen_Buffer
         {
             i32 temp;
             if (!gen_buffer_read_i32(buffer, &temp)) { return false; }
-            value->posX = temp;
+            const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(temp)) & mask;
+            const uint64_t sign_bit = UINT64_C(1) << 19;
+            if (masked & sign_bit) { masked |= ~mask; }
+            value->posX = (i32)masked;
         }
     }
     value->has_posY = (bitmask[0] >> 2) & 1u;
@@ -737,7 +743,11 @@ bool gen_PlayerState_read(gen_PlayerState *value, gen_Buffer *buffer, gen_Buffer
         {
             i32 temp;
             if (!gen_buffer_read_i32(buffer, &temp)) { return false; }
-            value->posY = temp;
+            const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(temp)) & mask;
+            const uint64_t sign_bit = UINT64_C(1) << 19;
+            if (masked & sign_bit) { masked |= ~mask; }
+            value->posY = (i32)masked;
         }
     }
     value->has_posZ = (bitmask[0] >> 3) & 1u;
@@ -745,7 +755,11 @@ bool gen_PlayerState_read(gen_PlayerState *value, gen_Buffer *buffer, gen_Buffer
         {
             i32 temp;
             if (!gen_buffer_read_i32(buffer, &temp)) { return false; }
-            value->posZ = temp;
+            const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(temp)) & mask;
+            const uint64_t sign_bit = UINT64_C(1) << 19;
+            if (masked & sign_bit) { masked |= ~mask; }
+            value->posZ = (i32)masked;
         }
     }
     return true;
@@ -761,16 +775,46 @@ bool gen_PlayerState_write(const gen_PlayerState *value, gen_Buffer *buffer, con
     if (value->has_posZ) { bitmask[0] |= (1u << 3); }
     if (!gen_buffer_write_bytes(buffer, bitmask, sizeof(bitmask))) { return false; }
     if (value->has_yaw) {
-        if (!gen_buffer_write_u32(buffer, value->yaw)) { return false; }
+        {
+            u32 temp;
+            const uint64_t mask = ((UINT64_C(1) << 10) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(value->yaw)) & mask;
+            temp = (u32)masked;
+            if (!gen_buffer_write_u32(buffer, temp)) { return false; }
+        }
     }
     if (value->has_posX) {
-        if (!gen_buffer_write_i32(buffer, value->posX)) { return false; }
+        {
+            i32 temp;
+            const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(value->posX)) & mask;
+            const uint64_t sign_bit = UINT64_C(1) << 19;
+            if (masked & sign_bit) { masked |= ~mask; }
+            temp = (i32)masked;
+            if (!gen_buffer_write_i32(buffer, temp)) { return false; }
+        }
     }
     if (value->has_posY) {
-        if (!gen_buffer_write_i32(buffer, value->posY)) { return false; }
+        {
+            i32 temp;
+            const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(value->posY)) & mask;
+            const uint64_t sign_bit = UINT64_C(1) << 19;
+            if (masked & sign_bit) { masked |= ~mask; }
+            temp = (i32)masked;
+            if (!gen_buffer_write_i32(buffer, temp)) { return false; }
+        }
     }
     if (value->has_posZ) {
-        if (!gen_buffer_write_i32(buffer, value->posZ)) { return false; }
+        {
+            i32 temp;
+            const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(value->posZ)) & mask;
+            const uint64_t sign_bit = UINT64_C(1) << 19;
+            if (masked & sign_bit) { masked |= ~mask; }
+            temp = (i32)masked;
+            if (!gen_buffer_write_i32(buffer, temp)) { return false; }
+        }
     }
     return true;
 }
@@ -922,16 +966,46 @@ bool gen_PlayerState_encode_compact(const gen_PlayerState *value, gen_Buffer *bu
     if (value->has_posZ) { bitmask[0] |= (1u << 3); }
     if (!gen_buffer_write_bytes(buffer, bitmask, sizeof(bitmask))) { return false; }
     if (value->has_yaw) {
-        if (!gen_write_var_u32(buffer, (uint32_t)value->yaw)) { return false; }
+        {
+            u32 bw_value;
+            const uint64_t mask = ((UINT64_C(1) << 10) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(value->yaw)) & mask;
+            bw_value = (u32)masked;
+            if (!gen_write_var_u32(buffer, (uint32_t)bw_value)) { return false; }
+        }
     }
     if (value->has_posX) {
-        if (!gen_write_var_s32(buffer, (int32_t)value->posX)) { return false; }
+        {
+            i32 bw_value;
+            const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(value->posX)) & mask;
+            const uint64_t sign_bit = UINT64_C(1) << 19;
+            if (masked & sign_bit) { masked |= ~mask; }
+            bw_value = (i32)masked;
+            if (!gen_write_var_s32(buffer, (int32_t)bw_value)) { return false; }
+        }
     }
     if (value->has_posY) {
-        if (!gen_write_var_s32(buffer, (int32_t)value->posY)) { return false; }
+        {
+            i32 bw_value;
+            const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(value->posY)) & mask;
+            const uint64_t sign_bit = UINT64_C(1) << 19;
+            if (masked & sign_bit) { masked |= ~mask; }
+            bw_value = (i32)masked;
+            if (!gen_write_var_s32(buffer, (int32_t)bw_value)) { return false; }
+        }
     }
     if (value->has_posZ) {
-        if (!gen_write_var_s32(buffer, (int32_t)value->posZ)) { return false; }
+        {
+            i32 bw_value;
+            const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(value->posZ)) & mask;
+            const uint64_t sign_bit = UINT64_C(1) << 19;
+            if (masked & sign_bit) { masked |= ~mask; }
+            bw_value = (i32)masked;
+            if (!gen_write_var_s32(buffer, (int32_t)bw_value)) { return false; }
+        }
     }
     return true;
 }
@@ -973,36 +1047,66 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
                 case gen_playerStateParameters_yaw: {
                     value->has_yaw = true;
                     {
-                        uint32_t tmp = 0;
-                        if (!gen_read_var_u32(buffer, &tmp)) { return false; }
-                        value->yaw = (uint32_t)tmp;
+                        u32 bw_value;
+                        {
+                            uint32_t tmp = 0;
+                            if (!gen_read_var_u32(buffer, &tmp)) { return false; }
+                            bw_value = (uint32_t)tmp;
+                        }
+                        const uint64_t mask = ((UINT64_C(1) << 10) - UINT64_C(1));
+                        uint64_t masked = ((uint64_t)(bw_value)) & mask;
+                        value->yaw = (u32)masked;
                     }
                     break;
                 }
                 case gen_playerStateParameters_posX: {
                     value->has_posX = true;
                     {
-                        int32_t tmp = 0;
-                        if (!gen_read_var_s32(buffer, &tmp)) { return false; }
-                        value->posX = (int32_t)tmp;
+                        i32 bw_value;
+                        {
+                            int32_t tmp = 0;
+                            if (!gen_read_var_s32(buffer, &tmp)) { return false; }
+                            bw_value = (int32_t)tmp;
+                        }
+                        const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+                        uint64_t masked = ((uint64_t)(bw_value)) & mask;
+                        const uint64_t sign_bit = UINT64_C(1) << 19;
+                        if (masked & sign_bit) { masked |= ~mask; }
+                        value->posX = (i32)masked;
                     }
                     break;
                 }
                 case gen_playerStateParameters_posY: {
                     value->has_posY = true;
                     {
-                        int32_t tmp = 0;
-                        if (!gen_read_var_s32(buffer, &tmp)) { return false; }
-                        value->posY = (int32_t)tmp;
+                        i32 bw_value;
+                        {
+                            int32_t tmp = 0;
+                            if (!gen_read_var_s32(buffer, &tmp)) { return false; }
+                            bw_value = (int32_t)tmp;
+                        }
+                        const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+                        uint64_t masked = ((uint64_t)(bw_value)) & mask;
+                        const uint64_t sign_bit = UINT64_C(1) << 19;
+                        if (masked & sign_bit) { masked |= ~mask; }
+                        value->posY = (i32)masked;
                     }
                     break;
                 }
                 case gen_playerStateParameters_posZ: {
                     value->has_posZ = true;
                     {
-                        int32_t tmp = 0;
-                        if (!gen_read_var_s32(buffer, &tmp)) { return false; }
-                        value->posZ = (int32_t)tmp;
+                        i32 bw_value;
+                        {
+                            int32_t tmp = 0;
+                            if (!gen_read_var_s32(buffer, &tmp)) { return false; }
+                            bw_value = (int32_t)tmp;
+                        }
+                        const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+                        uint64_t masked = ((uint64_t)(bw_value)) & mask;
+                        const uint64_t sign_bit = UINT64_C(1) << 19;
+                        if (masked & sign_bit) { masked |= ~mask; }
+                        value->posZ = (i32)masked;
                     }
                     break;
                 }
@@ -1019,33 +1123,63 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
     value->has_yaw = (bitmask[0] >> 0) & 1u;
     if (value->has_yaw) {
         {
-            uint32_t tmp = 0;
-            if (!gen_read_var_u32(buffer, &tmp)) { return false; }
-            value->yaw = (uint32_t)tmp;
+            u32 bw_value;
+            {
+                uint32_t tmp = 0;
+                if (!gen_read_var_u32(buffer, &tmp)) { return false; }
+                bw_value = (uint32_t)tmp;
+            }
+            const uint64_t mask = ((UINT64_C(1) << 10) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(bw_value)) & mask;
+            value->yaw = (u32)masked;
         }
     }
     value->has_posX = (bitmask[0] >> 1) & 1u;
     if (value->has_posX) {
         {
-            int32_t tmp = 0;
-            if (!gen_read_var_s32(buffer, &tmp)) { return false; }
-            value->posX = (int32_t)tmp;
+            i32 bw_value;
+            {
+                int32_t tmp = 0;
+                if (!gen_read_var_s32(buffer, &tmp)) { return false; }
+                bw_value = (int32_t)tmp;
+            }
+            const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(bw_value)) & mask;
+            const uint64_t sign_bit = UINT64_C(1) << 19;
+            if (masked & sign_bit) { masked |= ~mask; }
+            value->posX = (i32)masked;
         }
     }
     value->has_posY = (bitmask[0] >> 2) & 1u;
     if (value->has_posY) {
         {
-            int32_t tmp = 0;
-            if (!gen_read_var_s32(buffer, &tmp)) { return false; }
-            value->posY = (int32_t)tmp;
+            i32 bw_value;
+            {
+                int32_t tmp = 0;
+                if (!gen_read_var_s32(buffer, &tmp)) { return false; }
+                bw_value = (int32_t)tmp;
+            }
+            const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(bw_value)) & mask;
+            const uint64_t sign_bit = UINT64_C(1) << 19;
+            if (masked & sign_bit) { masked |= ~mask; }
+            value->posY = (i32)masked;
         }
     }
     value->has_posZ = (bitmask[0] >> 3) & 1u;
     if (value->has_posZ) {
         {
-            int32_t tmp = 0;
-            if (!gen_read_var_s32(buffer, &tmp)) { return false; }
-            value->posZ = (int32_t)tmp;
+            i32 bw_value;
+            {
+                int32_t tmp = 0;
+                if (!gen_read_var_s32(buffer, &tmp)) { return false; }
+                bw_value = (int32_t)tmp;
+            }
+            const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
+            uint64_t masked = ((uint64_t)(bw_value)) & mask;
+            const uint64_t sign_bit = UINT64_C(1) << 19;
+            if (masked & sign_bit) { masked |= ~mask; }
+            value->posZ = (i32)masked;
         }
     }
     return true;

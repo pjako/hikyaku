@@ -343,6 +343,7 @@ typedef struct {
 typedef struct {
     char *name;
     char *base_type;
+    bool is_bitset;
     EnumValue *values;
     size_t value_count;
     size_t value_capacity;
@@ -531,6 +532,14 @@ static uint64_t token_to_uint64(const Token *tok) {
     return strtoull(tok->start, NULL, 10);
 }
 
+static uint32_t bitset_base_bits(const char *base_type) {
+    if (strcmp(base_type, "u8") == 0) { return 8; }
+    if (strcmp(base_type, "u16") == 0) { return 16; }
+    if (strcmp(base_type, "u32") == 0) { return 32; }
+    if (strcmp(base_type, "u64") == 0) { return 64; }
+    return 0;
+}
+
 static bool file_exists(const char *path) {
     struct stat st;
     return stat(path, &st) == 0;
@@ -572,7 +581,7 @@ static void parse_type(Parser *p, Schema *schema) {
     alias_slot->c_type = token_to_string(&ctype_tok);
 }
 
-static void parse_enum(Parser *p, Schema *schema) {
+static void parse_enum(Parser *p, Schema *schema, bool is_bitset) {
     Token name_tok = parser_next(p);
     if (name_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier after enum keyword", p->lexer.filename, name_tok.line); }
     char *name = token_to_string(&name_tok);
@@ -583,24 +592,62 @@ static void parse_enum(Parser *p, Schema *schema) {
         free(base_type);
         base_type = token_to_string(&base);
     }
+    if (is_bitset) {
+        if (bitset_base_bits(base_type) == 0) {
+            fatal("%s:%zu: error: bitset base type must be one of u8/u16/u32/u64", p->lexer.filename, name_tok.line);
+        }
+    }
     parser_expect(p, TOKEN_LBRACE, "expected '{' to begin enum");
     EnumDef def = {0};
     def.name = name;
     def.base_type = base_type;
     def.line = name_tok.line;
+    def.is_bitset = is_bitset;
     uint64_t last_value = 0;
     bool has_last = false;
+    uint32_t bit_index = 0;
+    uint32_t bit_width = is_bitset ? bitset_base_bits(base_type) : 0;
+    uint64_t used_bits = 0;
     while (!parser_match(p, TOKEN_RBRACE)) {
         Token ident = parser_next(p);
         if (ident.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier in enum", p->lexer.filename, ident.line); }
-        uint64_t value = has_last ? (last_value + 1) : 0;
-        if (parser_match(p, TOKEN_ASSIGN)) {
+        uint64_t value = 0;
+        bool has_assign = parser_match(p, TOKEN_ASSIGN);
+        if (has_assign) {
             Token num = parser_next(p);
             if (num.kind != TOKEN_NUMBER) { fatal("%s:%zu: error: expected number after '=' in enum", p->lexer.filename, num.line); }
             value = token_to_uint64(&num);
+        } else if (is_bitset) {
+            if (bit_width > 0 && bit_index >= bit_width) {
+                fatal("%s:%zu: error: too many flags in bitset '%s' for base type %s (max %u bits)",
+                      p->lexer.filename, ident.line, name, base_type, bit_width);
+            }
+            value = UINT64_C(1) << bit_index;
+        } else {
+            value = has_last ? (last_value + 1) : 0;
         }
-        has_last = true;
-        last_value = value;
+        if (is_bitset) {
+            if (bit_width < 64) {
+                uint64_t max_value = (UINT64_C(1) << bit_width);
+                if (value >= max_value) {
+                    fatal("%s:%zu: error: value %llu overflows bitset base type %s",
+                          p->lexer.filename, ident.line, (unsigned long long)value, base_type);
+                }
+            }
+            if (value == 0 || (value & (value - 1)) != 0) {
+                fatal("%s:%zu: error: bitset flag '%.*s' must be a single bit value",
+                      p->lexer.filename, ident.line, (int)(ident.end - ident.start), ident.start);
+            }
+            if (value & used_bits) {
+                fatal("%s:%zu: error: duplicate bit value for flag '%.*s' in bitset '%s'",
+                      p->lexer.filename, ident.line, (int)(ident.end - ident.start), ident.start, name);
+            }
+            used_bits |= value;
+            bit_index++;
+        } else {
+            has_last = true;
+            last_value = value;
+        }
         if (def.value_count == def.value_capacity) {
             size_t new_cap = ARRAY_GROW_CAP(def.value_capacity);
             def.values = (EnumValue *)realloc(def.values, new_cap * sizeof(EnumValue));
@@ -724,7 +771,12 @@ static void parse_schema(Parser *p, Schema *schema) {
         }
         if (token_equals(&tok, "enum")) {
             parser_next(p);
-            parse_enum(p, schema);
+            parse_enum(p, schema, false);
+            continue;
+        }
+        if (token_equals(&tok, "bitset")) {
+            parser_next(p);
+            parse_enum(p, schema, true);
             continue;
         }
         if (token_equals(&tok, "struct")) {
@@ -823,36 +875,116 @@ static const char *field_base_type(const Schema *schema, const FieldDef *field) 
     return en ? en->base_type : field->type_name;
 }
 
-static void append_scalar_encode(StringBuilder *out, const Schema *schema, const char *base_type, const char *value_expr, const char *indent) {
-    const char *p = schema->prefix;
-    if (type_is_bool(base_type)) {
-        sb_append(out, "%sif (!%sbuffer_write_bool(buffer, %s)) { return false; }\n", indent, p, value_expr);
-    } else if (type_is_u8(base_type)) {
-        sb_append(out, "%sif (!%sbuffer_write_u8(buffer, %s)) { return false; }\n", indent, p, value_expr);
-    } else if (type_is_u64(base_type)) {
-        sb_append(out, "%sif (!%swrite_var_u64(buffer, (uint64_t)%s)) { return false; }\n", indent, p, value_expr);
-    } else if (type_is_u32_compatible(base_type)) {
-        sb_append(out, "%sif (!%swrite_var_u32(buffer, (uint32_t)%s)) { return false; }\n", indent, p, value_expr);
-    } else if (type_is_signed64(base_type)) {
-        sb_append(out, "%sif (!%swrite_var_s64(buffer, (int64_t)%s)) { return false; }\n", indent, p, value_expr);
-    } else if (type_is_signed32(base_type)) {
-        sb_append(out, "%sif (!%swrite_var_s32(buffer, (int32_t)%s)) { return false; }\n", indent, p, value_expr);
-    } else if (type_is_f32(base_type)) {
-        sb_append(out, "%sif (!%swrite_compact_f32(buffer, %s)) { return false; }\n", indent, p, value_expr);
-    } else if (type_is_f64(base_type)) {
-        sb_append(out, "%sif (!%swrite_compact_f64(buffer, %s)) { return false; }\n", indent, p, value_expr);
-    } else {
-        fatal("schema_gen: unsupported scalar type '%s' for compact encoding", base_type);
+static bool base_type_is_signed(const char *base_type) {
+    return type_is_signed32(base_type) || type_is_signed64(base_type);
+}
+
+static bool base_type_is_integer(const char *base_type) {
+    return type_is_u8(base_type) || type_is_u32_compatible(base_type) || type_is_u64(base_type) || base_type_is_signed(base_type);
+}
+
+static void validate_bit_width(const Schema *schema, const FieldDef *field, const char *base_type) {
+    if (field->bit_width == 0) { return; }
+    if (!base_type_is_integer(base_type)) {
+        fatal("%s:%zu: error: bit width is only supported for integer fields (field '%s' of type '%s')",
+              schema->filename ? schema->filename : "(unknown file)", field->line, field->name, base_type);
+    }
+    if (field->bit_width > 64) {
+        fatal("%s:%zu: error: bit width on field '%s' exceeds 64 bits (got %u)",
+              schema->filename ? schema->filename : "(unknown file)", field->line, field->name, field->bit_width);
     }
 }
 
-static void append_scalar_decode(StringBuilder *out, const Schema *schema, const char *base_type, const char *target_expr, const char *indent, const char *failure_action) {
+static void append_bit_width_assign(StringBuilder *out, const Schema *schema, const FieldDef *field, const char *source_expr, const char *target_expr, const char *indent) {
+    const char *base_type = field_base_type(schema, field);
+    validate_bit_width(schema, field, base_type);
+    if (field->bit_width == 0) {
+        sb_append(out, "%s%s = %s;\n", indent, target_expr, source_expr);
+        return;
+    }
+
+    char mask_literal[64];
+    if (field->bit_width >= 64) {
+        snprintf(mask_literal, sizeof(mask_literal), "UINT64_MAX");
+    } else {
+        snprintf(mask_literal, sizeof(mask_literal), "((UINT64_C(1) << %u) - UINT64_C(1))", field->bit_width);
+    }
+
+    char ctype_buf[256];
+    const char *ctype = c_type_for(schema, field->type_name, ctype_buf, sizeof(ctype_buf), field->line);
+    sb_append(out, "%sconst uint64_t mask = %s;\n", indent, mask_literal);
+    sb_append(out, "%suint64_t masked = ((uint64_t)(%s)) & mask;\n", indent, source_expr);
+    if (base_type_is_signed(base_type) && field->bit_width < 64) {
+        sb_append(out, "%sconst uint64_t sign_bit = UINT64_C(1) << %u;\n", indent, field->bit_width - 1);
+        sb_append(out, "%sif (masked & sign_bit) { masked |= ~mask; }\n", indent);
+    }
+    sb_append(out, "%s%s = (%s)masked;\n", indent, target_expr, ctype);
+}
+
+static void append_scalar_encode(StringBuilder *out, const Schema *schema, const FieldDef *field, const char *value_expr, const char *indent) {
+    const char *base_type = field_base_type(schema, field);
+    validate_bit_width(schema, field, base_type);
+    const char *value_ref = value_expr;
+    char inner_indent[64];
+    const char *emit_indent = indent;
+    bool has_bit_width = field->bit_width > 0;
+    if (has_bit_width) {
+        snprintf(inner_indent, sizeof(inner_indent), "%s    ", indent);
+        char ctype_buf[256];
+        const char *ctype = c_type_for(schema, field->type_name, ctype_buf, sizeof(ctype_buf), field->line);
+        sb_append(out, "%s{\n", indent);
+        sb_append(out, "%s    %s bw_value;\n", indent, ctype);
+        append_bit_width_assign(out, schema, field, value_expr, "bw_value", inner_indent);
+        value_ref = "bw_value";
+        emit_indent = inner_indent;
+    }
+    const char *p = schema->prefix;
+    if (type_is_bool(base_type)) {
+        sb_append(out, "%sif (!%sbuffer_write_bool(buffer, %s)) { return false; }\n", emit_indent, p, value_ref);
+    } else if (type_is_u8(base_type)) {
+        sb_append(out, "%sif (!%sbuffer_write_u8(buffer, %s)) { return false; }\n", emit_indent, p, value_ref);
+    } else if (type_is_u64(base_type)) {
+        sb_append(out, "%sif (!%swrite_var_u64(buffer, (uint64_t)%s)) { return false; }\n", emit_indent, p, value_ref);
+    } else if (type_is_u32_compatible(base_type)) {
+        sb_append(out, "%sif (!%swrite_var_u32(buffer, (uint32_t)%s)) { return false; }\n", emit_indent, p, value_ref);
+    } else if (type_is_signed64(base_type)) {
+        sb_append(out, "%sif (!%swrite_var_s64(buffer, (int64_t)%s)) { return false; }\n", emit_indent, p, value_ref);
+    } else if (type_is_signed32(base_type)) {
+        sb_append(out, "%sif (!%swrite_var_s32(buffer, (int32_t)%s)) { return false; }\n", emit_indent, p, value_ref);
+    } else if (type_is_f32(base_type)) {
+        sb_append(out, "%sif (!%swrite_compact_f32(buffer, %s)) { return false; }\n", emit_indent, p, value_ref);
+    } else if (type_is_f64(base_type)) {
+        sb_append(out, "%sif (!%swrite_compact_f64(buffer, %s)) { return false; }\n", emit_indent, p, value_ref);
+    } else {
+        fatal("schema_gen: unsupported scalar type '%s' for compact encoding", base_type);
+    }
+    if (has_bit_width) {
+        sb_append(out, "%s}\n", indent);
+    }
+}
+
+static void append_scalar_decode(StringBuilder *out, const Schema *schema, const FieldDef *field, const char *target_expr, const char *indent, const char *failure_action) {
+    const char *base_type = field_base_type(schema, field);
+    validate_bit_width(schema, field, base_type);
+    char inner_indent[64];
+    const char *emit_indent = indent;
+    const char *target_ref = target_expr;
+    bool has_bit_width = field->bit_width > 0;
+    char ctype_buf[256];
+    const char *ctype = has_bit_width ? c_type_for(schema, field->type_name, ctype_buf, sizeof(ctype_buf), field->line) : NULL;
+    if (has_bit_width) {
+        snprintf(inner_indent, sizeof(inner_indent), "%s    ", indent);
+        sb_append(out, "%s{\n", indent);
+        sb_append(out, "%s%s bw_value;\n", inner_indent, ctype);
+        target_ref = "bw_value";
+        emit_indent = inner_indent;
+    }
     const char *p = schema->prefix;
     const char *fail = failure_action ? failure_action : "return false;";
     if (type_is_bool(base_type)) {
-        sb_append(out, "%sif (!%sbuffer_read_bool(buffer, &%s)) { %s }\n", indent, p, target_expr, fail);
+        sb_append(out, "%sif (!%sbuffer_read_bool(buffer, &%s)) { %s }\n", emit_indent, p, target_ref, fail);
     } else if (type_is_u8(base_type)) {
-        sb_append(out, "%sif (!%sbuffer_read_u8(buffer, &%s)) { %s }\n", indent, p, target_expr, fail);
+        sb_append(out, "%sif (!%sbuffer_read_u8(buffer, &%s)) { %s }\n", emit_indent, p, target_ref, fail);
     } else if (type_is_u64(base_type)) {
         sb_append(out,
             "%s{\n"
@@ -860,7 +992,7 @@ static void append_scalar_decode(StringBuilder *out, const Schema *schema, const
             "%s    if (!%sread_var_u64(buffer, &tmp)) { %s }\n"
             "%s    %s = (uint64_t)tmp;\n"
             "%s}\n",
-            indent, indent, indent, p, fail, indent, target_expr, indent);
+            emit_indent, emit_indent, emit_indent, p, fail, emit_indent, target_ref, emit_indent);
     } else if (type_is_u32_compatible(base_type)) {
         sb_append(out,
             "%s{\n"
@@ -868,7 +1000,7 @@ static void append_scalar_decode(StringBuilder *out, const Schema *schema, const
             "%s    if (!%sread_var_u32(buffer, &tmp)) { %s }\n"
             "%s    %s = (uint32_t)tmp;\n"
             "%s}\n",
-            indent, indent, indent, p, fail, indent, target_expr, indent);
+            emit_indent, emit_indent, emit_indent, p, fail, emit_indent, target_ref, emit_indent);
     } else if (type_is_signed64(base_type)) {
         sb_append(out,
             "%s{\n"
@@ -876,7 +1008,7 @@ static void append_scalar_decode(StringBuilder *out, const Schema *schema, const
             "%s    if (!%sread_var_s64(buffer, &tmp)) { %s }\n"
             "%s    %s = (int64_t)tmp;\n"
             "%s}\n",
-            indent, indent, indent, p, fail, indent, target_expr, indent);
+            emit_indent, emit_indent, emit_indent, p, fail, emit_indent, target_ref, emit_indent);
     } else if (type_is_signed32(base_type)) {
         sb_append(out,
             "%s{\n"
@@ -884,13 +1016,17 @@ static void append_scalar_decode(StringBuilder *out, const Schema *schema, const
             "%s    if (!%sread_var_s32(buffer, &tmp)) { %s }\n"
             "%s    %s = (int32_t)tmp;\n"
             "%s}\n",
-            indent, indent, indent, p, fail, indent, target_expr, indent);
+            emit_indent, emit_indent, emit_indent, p, fail, emit_indent, target_ref, emit_indent);
     } else if (type_is_f32(base_type)) {
-        sb_append(out, "%sif (!%sread_compact_f32(buffer, &%s)) { %s }\n", indent, p, target_expr, fail);
+        sb_append(out, "%sif (!%sread_compact_f32(buffer, &%s)) { %s }\n", emit_indent, p, target_ref, fail);
     } else if (type_is_f64(base_type)) {
-        sb_append(out, "%sif (!%sread_compact_f64(buffer, &%s)) { %s }\n", indent, p, target_expr, fail);
+        sb_append(out, "%sif (!%sread_compact_f64(buffer, &%s)) { %s }\n", emit_indent, p, target_ref, fail);
     } else {
         fatal("schema_gen: unsupported scalar type '%s' for compact decoding", base_type);
+    }
+    if (has_bit_width) {
+        append_bit_width_assign(out, schema, field, "bw_value", target_expr, emit_indent);
+        sb_append(out, "%s}\n", indent);
     }
 }
 
@@ -965,7 +1101,7 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
                 snprintf(item_expr, sizeof(item_expr), "value->%s.items[i]", field->name);
                 char inner_indent[32];
                 snprintf(inner_indent, sizeof(inner_indent), "%s    ", indent);
-                append_scalar_encode(impl, schema, field_base_type(schema, field), item_expr, inner_indent);
+                append_scalar_encode(impl, schema, field, item_expr, inner_indent);
             }
             sb_append(impl, "%s}\n", indent);
         } else if (type_is_struct_type(schema, field->type_name)) {
@@ -973,7 +1109,7 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
             make_prefixed(nested, sizeof(nested), schema, field->type_name);
             sb_append(impl, "%sif (!%s_encode_compact(&value->%s, buffer, schema)) { return false; }\n", indent, nested, field->name);
         } else {
-            append_scalar_encode(impl, schema, field_base_type(schema, field), field_expr, indent);
+            append_scalar_encode(impl, schema, field, field_expr, indent);
         }
 
         if (field->is_optional) {
@@ -1070,7 +1206,7 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
                     "%s        for (uint32_t k = 0; k < count; ++k) {\n", indent);
                 char inner_indent[32];
                 snprintf(inner_indent, sizeof(inner_indent), "%s            ", indent);
-                append_scalar_decode(impl, schema, field_base_type(schema, field), "items[k]", inner_indent, fail_action);
+                append_scalar_decode(impl, schema, field, "items[k]", inner_indent, fail_action);
                 sb_append(impl,
                     "%s        }\n", indent);
             }
@@ -1087,7 +1223,7 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
         } else {
             char target[256];
             snprintf(target, sizeof(target), "value->%s", field->name);
-            append_scalar_decode(impl, schema, field_base_type(schema, field), target, indent, NULL);
+            append_scalar_decode(impl, schema, field, target, indent, NULL);
         }
         sb_append(impl, "                    break;\n");
         sb_append(impl, "                }\n");
@@ -1156,7 +1292,7 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
                     "%s        for (uint32_t i = 0; i < count; ++i) {\n", indent);
                 char inner_indent[32];
                 snprintf(inner_indent, sizeof(inner_indent), "%s            ", indent);
-                append_scalar_decode(impl, schema, field_base_type(schema, field), "items[i]", inner_indent, fail_action);
+                append_scalar_decode(impl, schema, field, "items[i]", inner_indent, fail_action);
                 sb_append(impl,
                     "%s        }\n", indent);
             }
@@ -1173,7 +1309,7 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
         } else {
             char target[256];
             snprintf(target, sizeof(target), "value->%s", field->name);
-            append_scalar_decode(impl, schema, field_base_type(schema, field), target, indent, NULL);
+            append_scalar_decode(impl, schema, field, target, indent, NULL);
         }
 
         if (field->is_optional) {
@@ -1260,7 +1396,7 @@ static void append_message_codec(StringBuilder *decls, StringBuilder *impl, cons
             } else {
                 char item_expr[256];
                 snprintf(item_expr, sizeof(item_expr), "value->%s.items[i]", field->name);
-                append_scalar_encode(impl, schema, field_base_type(schema, field), item_expr, "            ");
+                append_scalar_encode(impl, schema, field, item_expr, "            ");
             }
             sb_append(impl, "        }\n");
             sb_append(impl,
@@ -1280,7 +1416,7 @@ static void append_message_codec(StringBuilder *decls, StringBuilder *impl, cons
         } else {
             char value_expr[256];
             snprintf(value_expr, sizeof(value_expr), "value->%s", field->name);
-            append_scalar_encode(impl, schema, field_base_type(schema, field), value_expr, "        ");
+            append_scalar_encode(impl, schema, field, value_expr, "        ");
         }
         sb_append(impl, "    }\n");
     }
@@ -1343,7 +1479,7 @@ static void append_message_codec(StringBuilder *decls, StringBuilder *impl, cons
             } else {
                 char fail_action[256];
                 snprintf(fail_action, sizeof(fail_action), "%sbuffer_pop_to(memory, memory_marker); return false;", schema->prefix);
-                append_scalar_decode(impl, schema, field_base_type(schema, field), "items[i]", "                        ", fail_action);
+                append_scalar_decode(impl, schema, field, "items[i]", "                        ", fail_action);
             }
             sb_append(impl, "                    }\n");
             sb_append(impl,
@@ -1363,7 +1499,7 @@ static void append_message_codec(StringBuilder *decls, StringBuilder *impl, cons
         } else {
             char target[256];
             snprintf(target, sizeof(target), "value->%s", field->name);
-            append_scalar_decode(impl, schema, field_base_type(schema, field), target, "                ", "return false;");
+            append_scalar_decode(impl, schema, field, target, "                ", "return false;");
         }
         sb_append(impl, "                break;\n            }\n");
     }
@@ -1861,13 +1997,24 @@ static void append_enum_defs(StringBuilder *out, const Schema *schema) {
         const EnumDef *def = &schema->enums[i];
         char enum_name[256];
         make_prefixed(enum_name, sizeof(enum_name), schema, def->name);
-        sb_append(out, "typedef enum %s {\n", enum_name);
+        char base_buf[256];
+        const char *base_ctype = def->is_bitset ? c_type_for(schema, def->base_type, base_buf, sizeof(base_buf), def->line) : NULL;
+        if (def->is_bitset) {
+            sb_append(out, "typedef %s %s;\n", base_ctype, enum_name);
+            sb_append(out, "enum {\n");
+        } else {
+            sb_append(out, "typedef enum %s {\n", enum_name);
+        }
         for (size_t j = 0; j < def->value_count; ++j) {
             char value_name[256];
             make_enum_value_name(value_name, sizeof(value_name), schema, def->name, def->values[j].name);
             sb_append(out, "    %s = %llu,\n", value_name, (unsigned long long)def->values[j].value);
         }
-        sb_append(out, "} %s;\n\n", enum_name);
+        if (def->is_bitset) {
+            sb_append(out, "};\n\n");
+        } else {
+            sb_append(out, "} %s;\n\n", enum_name);
+        }
     }
 }
 
@@ -2126,7 +2273,15 @@ static void append_struct_io(StringBuilder *decls, StringBuilder *impl, const Sc
                 sb_append(impl, "%s    if (!%sbuffer_read_%s(buffer, &raw)) { return false; }\n", indent, schema->prefix, en->base_type);
                 char enum_name[256];
                 make_prefixed(enum_name, sizeof(enum_name), schema, field->type_name);
-                sb_append(impl, "%s    value->%s = (%s)raw;\n", indent, field->name, enum_name);
+                if (field->bit_width > 0) {
+                    char target[256];
+                    snprintf(target, sizeof(target), "value->%s", field->name);
+                    char bw_indent[64];
+                    snprintf(bw_indent, sizeof(bw_indent), "%s    ", indent);
+                    append_bit_width_assign(impl, schema, field, "raw", target, bw_indent);
+                } else {
+                    sb_append(impl, "%s    value->%s = (%s)raw;\n", indent, field->name, enum_name);
+                }
                 sb_append(impl, "%s}\n", indent);
             } else if (is_scalar_type(schema, field->type_name)) {
                 if (field->bit_width > 0) {
@@ -2135,7 +2290,11 @@ static void append_struct_io(StringBuilder *decls, StringBuilder *impl, const Sc
                     sb_append(impl, "%s{\n", indent);
                     sb_append(impl, "%s    %s temp;\n", indent, ctype);
                     sb_append(impl, "%s    if (!%sbuffer_read_%s(buffer, &temp)) { return false; }\n", indent, schema->prefix, field->type_name);
-                    sb_append(impl, "%s    value->%s = temp;\n", indent, field->name);
+                    char target[256];
+                    snprintf(target, sizeof(target), "value->%s", field->name);
+                    char bw_indent[64];
+                    snprintf(bw_indent, sizeof(bw_indent), "%s    ", indent);
+                    append_bit_width_assign(impl, schema, field, "temp", target, bw_indent);
                     sb_append(impl, "%s}\n", indent);
                 } else {
                     sb_append(impl, "%sif (!%sbuffer_read_%s(buffer, &value->%s)) { return false; }\n", indent, schema->prefix, field->type_name, field->name);
@@ -2193,9 +2352,37 @@ static void append_struct_io(StringBuilder *decls, StringBuilder *impl, const Sc
                 const EnumDef *en = find_enum_const(schema, field->type_name);
                 char base_buf[256];
                 const char *base_type = c_type_for(schema, en->base_type, base_buf, sizeof(base_buf), en->line);
-                sb_append(impl, "%sif (!%sbuffer_write_%s(buffer, (%s)value->%s)) { return false; }\n", indent, schema->prefix, en->base_type, base_type, field->name);
+                if (field->bit_width > 0) {
+                    sb_append(impl, "%s{\n", indent);
+                    char enum_name[256];
+                    make_prefixed(enum_name, sizeof(enum_name), schema, field->type_name);
+                    sb_append(impl, "%s    %s narrowed;\n", indent, enum_name);
+                    char bw_indent[64];
+                    snprintf(bw_indent, sizeof(bw_indent), "%s    ", indent);
+                    char source[256];
+                    snprintf(source, sizeof(source), "value->%s", field->name);
+                    append_bit_width_assign(impl, schema, field, source, "narrowed", bw_indent);
+                    sb_append(impl, "%s    if (!%sbuffer_write_%s(buffer, (%s)narrowed)) { return false; }\n", indent, schema->prefix, en->base_type, base_type);
+                    sb_append(impl, "%s}\n", indent);
+                } else {
+                    sb_append(impl, "%sif (!%sbuffer_write_%s(buffer, (%s)value->%s)) { return false; }\n", indent, schema->prefix, en->base_type, base_type, field->name);
+                }
             } else if (is_scalar_type(schema, field->type_name)) {
-                sb_append(impl, "%sif (!%sbuffer_write_%s(buffer, value->%s)) { return false; }\n", indent, schema->prefix, field->type_name, field->name);
+                if (field->bit_width > 0) {
+                    char buf[256];
+                    const char *ctype = c_type_for(schema, field->type_name, buf, sizeof(buf), field->line);
+                    sb_append(impl, "%s{\n", indent);
+                    sb_append(impl, "%s    %s temp;\n", indent, ctype);
+                    char bw_indent[64];
+                    snprintf(bw_indent, sizeof(bw_indent), "%s    ", indent);
+                    char source[256];
+                    snprintf(source, sizeof(source), "value->%s", field->name);
+                    append_bit_width_assign(impl, schema, field, source, "temp", bw_indent);
+                    sb_append(impl, "%s    if (!%sbuffer_write_%s(buffer, temp)) { return false; }\n", indent, schema->prefix, field->type_name);
+                    sb_append(impl, "%s}\n", indent);
+                } else {
+                    sb_append(impl, "%sif (!%sbuffer_write_%s(buffer, value->%s)) { return false; }\n", indent, schema->prefix, field->type_name, field->name);
+                }
             } else {
                 char nested[256];
                 make_prefixed(nested, sizeof(nested), schema, field->type_name);
