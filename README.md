@@ -1,6 +1,6 @@
-# schema_gen
+# hikyaku
 
-`schema_gen` is a single-file, public-domain schema compiler that converts a small `.cm` schema language into a C99 header containing struct definitions, buffer helpers, and serialization code. It is tailored for compact network messages where allocating a heavyweight runtime (e.g. Protocol Buffers or FlatBuffers) would be overkill.
+`hikyaku`—named after the historic Japanese couriers—is a single-file, public-domain schema compiler that converts a small `.cm` schema language into a C99 header containing struct definitions, buffer helpers, and serialization code. It is tailored for compact network messages where allocating a heavyweight runtime (e.g. Protocol Buffers or FlatBuffers) would be overkill.
 
 ## Highlights
 - Generates header-only C APIs and matching binary schema blobs from a single schema file.
@@ -16,12 +16,22 @@ The program is intentionally freestanding—no libraries beyond the C runtime ar
 
 ## Usage
 ```bash
-./schema_gen input.cm output.h
+./schema_gen input.cm output.h [--ignore-compat]
 ```
 
 This emits:
 1. `output.h` – the generated header (definitions + optional implementation when `SCHEMA_PREFIX_IMPLEMENTATION` is defined).
-2. `output.bschema` – a compact binary schema that mirrors the textual schema. It can be parsed at runtime via `prefixparse_schema` or embedded through helper APIs.
+2. `output.hibinschema` – a compact binary schema that mirrors the textual schema. It can be parsed at runtime via `prefixparse_schema` or embedded through helper APIs.
+
+By default the generator will **refuse to overwrite** an existing `output.hibinschema` if it detects backwards-incompatible changes (e.g., enum/struct removal, changing field types/flags/ids). Pass `--ignore-compat` to skip this guard when you intentionally break compatibility.
+
+### Compatibility guard (why changes are blocked)
+Binary schemas are meant to be stable contracts: downstream code that reads an older stream must be able to decode packets emitted by newer writers. Because of that the generator enforces:
+- Existing enums/structs/messages cannot be removed or have their kind changed.
+- Fields in structs/messages cannot be renamed, retyped, reordered, or have modifiers (array/optional/deprecated) changed.
+- Structs/messages cannot be extended with new fields (growth changes field ids and breaks existing decoders).
+
+If you truly need a breaking change, bump to a new type/message name or supply `--ignore-compat` for that run and accept the ABI break.
 
 Define `PREFIX_IMPLEMENTATION` (derived from your schema prefix, see below) in exactly one translation unit before including the header to generate the function bodies.
 
@@ -93,4 +103,4 @@ const prefixSchemaInfo *info = prefixget_embedded_schema(&arena);
 - The tool emits human-readable errors (`schema_gen: line ...`) for malformed schemas.
 
 ## License
-Public domain. Where that dedication is not recognized, a perpetual, irrevocable license is granted to copy, distribute, and modify the code. (See the license text embedded at the top of `schema_gen.c`.)
+Released under the Unlicense (public domain dedication). See `LICENSE` or the header comment in `schema_gen.c` for details. Attribution is appreciated but not required.

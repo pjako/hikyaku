@@ -64,6 +64,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define ARRAY_GROW_CAP(cap) ((cap) ? ((cap) * 2) : 8)
 
@@ -376,12 +377,37 @@ typedef struct {
     bool is_deprecated;
 } FieldDef;
 
+// --- Compatibility checking helpers ---
+
+typedef struct {
+    char *name;
+    uint32_t id;
+    uint32_t type_id;
+    bool is_array;
+    bool is_optional;
+    bool is_deprecated;
+} CompatField;
+
+typedef struct {
+    char *name;
+    uint8_t kind; // 0=ENUM, 1=STRUCT, 2=MESSAGE
+    uint32_t type_id;
+    CompatField *fields;
+    uint32_t field_count;
+} CompatType;
+
+typedef struct {
+    CompatType *types;
+    size_t type_count;
+} CompatSchema;
+
 typedef struct {
     char *name;
     StructKind kind;
     FieldDef *fields;
     size_t field_count;
     size_t field_capacity;
+    size_t line;
 } StructDef;
 
 typedef struct {
@@ -395,6 +421,7 @@ typedef struct {
     TypeAlias *aliases;
     size_t alias_count;
     size_t alias_capacity;
+    size_t builtin_alias_count;
     EnumDef *enums;
     size_t enum_count;
     size_t enum_capacity;
@@ -408,15 +435,17 @@ typedef struct {
 
 static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro, const StringBuilder *bin_data);
 
+static const struct { const char *name; const char *ctype; } BUILTIN_ALIASES[] = {
+    {"u8", "uint8_t"}, {"u16", "uint16_t"}, {"u32", "uint32_t"}, {"u64", "uint64_t"},
+    {"i8", "int8_t"}, {"i16", "int16_t"}, {"i32", "int32_t"}, {"i64", "int64_t"},
+    {"f32", "float"}, {"f64", "double"}, {"bool", "bool"}
+};
+
 static void schema_init(Schema *schema) {
     memset(schema, 0, sizeof(*schema));
     schema->prefix = str_dup("gen_");
-    const struct { const char *name; const char *ctype; } builtins[] = {
-        {"u8", "uint8_t"}, {"u16", "uint16_t"}, {"u32", "uint32_t"}, {"u64", "uint64_t"},
-        {"i8", "int8_t"}, {"i16", "int16_t"}, {"i32", "int32_t"}, {"i64", "int64_t"},
-        {"f32", "float"}, {"f64", "double"}, {"bool", "bool"}
-    };
-    for (size_t i = 0; i < sizeof(builtins)/sizeof(builtins[0]); ++i) {
+    schema->builtin_alias_count = sizeof(BUILTIN_ALIASES) / sizeof(BUILTIN_ALIASES[0]);
+    for (size_t i = 0; i < schema->builtin_alias_count; ++i) {
         if (schema->alias_count == schema->alias_capacity) {
             size_t new_cap = ARRAY_GROW_CAP(schema->alias_capacity);
             schema->aliases = (TypeAlias *)realloc(schema->aliases, new_cap * sizeof(TypeAlias));
@@ -424,8 +453,8 @@ static void schema_init(Schema *schema) {
             schema->alias_capacity = new_cap;
         }
         TypeAlias *alias = &schema->aliases[schema->alias_count++];
-        alias->name = str_dup(builtins[i].name);
-        alias->c_type = str_dup(builtins[i].ctype);
+        alias->name = str_dup(BUILTIN_ALIASES[i].name);
+        alias->c_type = str_dup(BUILTIN_ALIASES[i].ctype);
     }
 }
 
@@ -456,7 +485,15 @@ static void schema_add_array(Schema *schema, const char *element_type, size_t li
     schema->array_count++;
 }
 
-static void schema_add_field(StructDef *st, FieldDef field) {
+static void schema_add_field(const Schema *schema, StructDef *st, FieldDef field) {
+    for (size_t i = 0; i < st->field_count; ++i) {
+        if (strcmp(st->fields[i].name, field.name) == 0) {
+            fatal("%s:%zu: error: duplicate field '%s' in %s '%s' (previous at line %zu)",
+                  schema && schema->filename ? schema->filename : "(unknown file)", field.line, field.name,
+                  st->kind == STRUCT_KIND_MESSAGE ? "message" : "struct",
+                  st->name, st->fields[i].line);
+        }
+    }
     if (st->field_count == st->field_capacity) {
         size_t new_cap = ARRAY_GROW_CAP(st->field_capacity);
         st->fields = (FieldDef *)realloc(st->fields, new_cap * sizeof(FieldDef));
@@ -492,6 +529,11 @@ static FieldDefault field_default_enum(const char *value) {
 
 static uint64_t token_to_uint64(const Token *tok) {
     return strtoull(tok->start, NULL, 10);
+}
+
+static bool file_exists(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0;
 }
 
 static bool token_equals(const Token *tok, const char *text) {
@@ -653,8 +695,9 @@ static void parse_struct(Parser *p, Schema *schema, StructKind kind) {
     parser_expect(p, TOKEN_LBRACE, "expected '{' after struct/message name");
     while (!parser_match(p, TOKEN_RBRACE)) {
         FieldDef field = parse_struct_field(p, schema, kind);
-        schema_add_field(&def, field);
+        schema_add_field(schema, &def, field);
     }
+    def.line = name_tok.line;
     if (schema->struct_count == schema->struct_capacity) {
         size_t new_cap = ARRAY_GROW_CAP(schema->struct_capacity);
         schema->structs = (StructDef *)realloc(schema->structs, new_cap * sizeof(StructDef));
@@ -2471,6 +2514,140 @@ static void generate_binary_schema_data(const Schema *schema, StringBuilder *sb)
     }
 }
 
+// --- Compatibility checking ---
+
+static const char *compat_find_type_name_by_id(const CompatSchema *cs, size_t builtin_alias_count, uint32_t type_id) {
+    for (size_t i = 0; i < cs->type_count; ++i) {
+        if (cs->types[i].type_id == type_id) { return cs->types[i].name; }
+    }
+    if (type_id < builtin_alias_count) { return BUILTIN_ALIASES[type_id].name; }
+    return NULL;
+}
+
+static const char *compat_read_strz(const uint8_t **cursor, const uint8_t *end) {
+    const char *str = (const char *)*cursor;
+    while (*cursor < end && **cursor != 0) { (*cursor)++; }
+    if (*cursor < end) { (*cursor)++; return str; }
+    return NULL;
+}
+
+static uint64_t compat_read_varuint(const uint8_t **cursor, const uint8_t *end) {
+    uint64_t result = 0;
+    uint32_t shift = 0;
+    while (*cursor < end && shift < 64) {
+        uint8_t byte = *(*cursor)++;
+        result |= ((uint64_t)(byte & 0x7F) << shift);
+        if ((byte & 0x80) == 0) { break; }
+        shift += 7;
+    }
+    return result;
+}
+
+static void compat_parse_binary_schema(const char *path, size_t builtin_alias_count, CompatSchema *out) {
+    memset(out, 0, sizeof(*out));
+    (void)builtin_alias_count;
+    size_t len = 0;
+    char *data = read_entire_file(path, &len);
+    const uint8_t *cursor = (const uint8_t *)data;
+    const uint8_t *end = cursor + len;
+    if (len < 5 || memcmp(cursor, BINARY_MAGIC, 4) != 0) {
+        free(data);
+        fatal("schema_gen: existing binary schema '%s' has invalid magic", path);
+    }
+    cursor += 4;
+    uint8_t version = *cursor++;
+    if (version != BINARY_VERSION) {
+        free(data);
+        fatal("schema_gen: existing binary schema '%s' has incompatible version (%u)", path, (unsigned)version);
+    }
+    uint64_t type_count = compat_read_varuint(&cursor, end);
+    out->types = (CompatType *)calloc(type_count, sizeof(CompatType));
+    if (!out->types) { free(data); fatal("schema_gen: out of memory while reading existing schema"); }
+    out->type_count = (size_t)type_count;
+    for (size_t i = 0; i < out->type_count; ++i) {
+        CompatType *t = &out->types[i];
+        const char *name = compat_read_strz(&cursor, end);
+        if (!name) { free(data); fatal("schema_gen: malformed string in existing schema"); }
+        t->name = str_dup(name);
+        if (cursor >= end) { free(data); fatal("schema_gen: truncated schema while reading kind"); }
+        t->kind = *cursor++;
+        t->type_id = (uint32_t)compat_read_varuint(&cursor, end);
+        uint64_t fcount = compat_read_varuint(&cursor, end);
+        t->field_count = (uint32_t)fcount;
+        if (fcount > 0) {
+            t->fields = (CompatField *)calloc(fcount, sizeof(CompatField));
+            if (!t->fields) { free(data); fatal("schema_gen: out of memory while reading fields"); }
+            for (uint32_t j = 0; j < t->field_count; ++j) {
+                CompatField *f = &t->fields[j];
+                const char *fname = compat_read_strz(&cursor, end);
+                if (!fname) { free(data); fatal("schema_gen: malformed field name"); }
+                f->name = str_dup(fname);
+                f->id = (uint32_t)compat_read_varuint(&cursor, end);
+                f->type_id = (uint32_t)compat_read_varuint(&cursor, end);
+                if (cursor >= end) { free(data); fatal("schema_gen: truncated while reading field flags"); }
+                uint8_t flags = *cursor++;
+                f->is_array = (flags & 1) != 0;
+                f->is_optional = (flags & 2) != 0;
+                f->is_deprecated = (flags & 4) != 0;
+            }
+        }
+    }
+    free(data);
+}
+
+static void check_backward_compatibility(const char *existing_path, const Schema *schema) {
+    CompatSchema old_schema = {0};
+    compat_parse_binary_schema(existing_path, schema->builtin_alias_count, &old_schema);
+
+    for (size_t i = 0; i < old_schema.type_count; ++i) {
+        const CompatType *ot = &old_schema.types[i];
+        if (ot->kind == 0) {
+            if (!find_enum_const(schema, ot->name)) {
+                fatal("%s: incompatible change: removed enum '%s'", schema->filename, ot->name);
+            }
+            continue;
+        }
+        StructKind expected_kind = (ot->kind == 2) ? STRUCT_KIND_MESSAGE : STRUCT_KIND_STRUCT;
+        const StructDef *st = find_struct_const(schema, ot->name);
+        if (!st) { fatal("%s: incompatible change: removed type '%s'", schema->filename, ot->name); }
+        if (st->kind != expected_kind) { fatal("%s:%zu: incompatible change: kind of '%s' changed", schema->filename, st->line, ot->name); }
+
+        for (size_t j = 0; j < st->field_count; ++j) {
+            const FieldDef *nf = &st->fields[j];
+            const CompatField *of = &ot->fields[j];
+            if (strcmp(nf->name, of->name) != 0) {
+                fatal("%s:%zu: incompatible change: field %zu in '%s' missing expected '%s' (found '%s'; removing/reordering fields breaks binary compatibility)",
+                      schema->filename, nf->line, j, ot->name, of->name, nf->name);
+            }
+            uint32_t expected_id = (st->kind == STRUCT_KIND_MESSAGE) ? (uint32_t)(j + 1) : (uint32_t)j;
+            if (of->id != expected_id) {
+                fatal("%s:%zu: incompatible change: field '%s' id changed (%u -> %u)", schema->filename, nf->line, nf->name, of->id, expected_id);
+            }
+            if (nf->is_array != of->is_array || nf->is_optional != of->is_optional || nf->is_deprecated != of->is_deprecated) {
+                fatal("%s:%zu: incompatible change: field '%s' modifiers changed", schema->filename, nf->line, nf->name);
+            }
+            const char *old_type_name = compat_find_type_name_by_id(&old_schema, schema->builtin_alias_count, of->type_id);
+            if (!old_type_name) {
+                fatal("%s:%zu: incompatible change: field '%s' refers to unknown type id %u in existing schema", schema->filename, nf->line, nf->name, of->type_id);
+            }
+            uint32_t new_old_type_id = get_type_id(schema, old_type_name);
+            uint32_t new_field_type_id = get_type_id(schema, nf->type_name);
+            if (new_old_type_id != new_field_type_id) {
+                fatal("%s:%zu: incompatible change: field '%s' type changed (was '%s')", schema->filename, nf->line, nf->name, old_type_name);
+            }
+        }
+        if (st->field_count < ot->field_count) {
+            const CompatField *of = &ot->fields[st->field_count];
+            fatal("%s:%zu: incompatible change: removed field '%s' from '%s' (structs/messages are immutable; removing fields shifts ids and breaks older decoders)",
+                  schema->filename, st->line, of->name, ot->name);
+        }
+        if (st->field_count > ot->field_count) {
+            const FieldDef *nf = &st->fields[ot->field_count];
+            fatal("%s:%zu: incompatible change: added field '%s' to type '%s' (structs/messages are immutable; adding fields changes field ids and breaks older decoders)",
+                  schema->filename, nf->line, nf->name, ot->name);
+        }
+    }
+}
 static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro, const StringBuilder *bin_data) {
     // Embed binary schema
     sb_append(impl, "#define %sBINARY_MAGIC \"BKIW\"\n", schema->prefix);
@@ -2786,8 +2963,16 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <schema.cm> <output.h>\n", argv[0]);
+        fprintf(stderr, "usage: %s <schema.cm> <output.h> [--ignore-compat]\n", argv[0]);
         return EXIT_FAILURE;
+    }
+    bool ignore_compat = false;
+    for (int i = 3; i < argc; ++i) {
+        if (strcmp(argv[i], "--ignore-compat") == 0) {
+            ignore_compat = true;
+        } else {
+            fatal("schema_gen: unknown option '%s'", argv[i]);
+        }
     }
     const char *schema_path = argv[1];
     const char *output_path = argv[2];
@@ -2799,6 +2984,18 @@ int main(int argc, char **argv) {
     Parser parser;
     parser_init(&parser, file_data, schema_path);
     parse_schema(&parser, &schema);
+
+    char bin_path[1024];
+    size_t len = strlen(output_path);
+    if (len > 2 && strcmp(output_path + len - 2, ".h") == 0) {
+        snprintf(bin_path, sizeof(bin_path), "%.*s.hibschema", (int)(len - 2), output_path);
+    } else {
+        snprintf(bin_path, sizeof(bin_path), "%s.hibschema", output_path);
+    }
+
+    if (!ignore_compat && file_exists(bin_path)) {
+        check_backward_compatibility(bin_path, &schema);
+    }
     
     // Generate binary schema data
     StringBuilder bin_sb;
@@ -2806,13 +3003,6 @@ int main(int argc, char **argv) {
     generate_binary_schema_data(&schema, &bin_sb);
 
     // Write binary schema file
-    char bin_path[1024];
-    size_t len = strlen(output_path);
-    if (len > 2 && strcmp(output_path + len - 2, ".h") == 0) {
-        snprintf(bin_path, sizeof(bin_path), "%.*s.bschema", (int)(len - 2), output_path);
-    } else {
-        snprintf(bin_path, sizeof(bin_path), "%s.bschema", output_path);
-    }
     FILE *f = fopen(bin_path, "wb");
     if (!f) { fatal("schema_gen: failed to open '%s' for writing", bin_path); }
     fwrite(bin_sb.data, 1, bin_sb.count, f);
