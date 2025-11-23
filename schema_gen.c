@@ -414,8 +414,7 @@ static void schema_init(Schema *schema) {
     const struct { const char *name; const char *ctype; } builtins[] = {
         {"u8", "uint8_t"}, {"u16", "uint16_t"}, {"u32", "uint32_t"}, {"u64", "uint64_t"},
         {"i8", "int8_t"}, {"i16", "int16_t"}, {"i32", "int32_t"}, {"i64", "int64_t"},
-        {"f32", "float"}, {"f64", "double"}, {"bool", "bool"},
-        {"optr32", "uint32_t"}, {"id32", "uint32_t"}
+        {"f32", "float"}, {"f64", "double"}, {"bool", "bool"}
     };
     for (size_t i = 0; i < sizeof(builtins)/sizeof(builtins[0]); ++i) {
         if (schema->alias_count == schema->alias_capacity) {
@@ -593,22 +592,8 @@ static FieldDef parse_struct_field(Parser *p, Schema *schema, StructKind kind) {
         parser_expect(p, TOKEN_RBRACKET, "expected ']' after attribute");
     }
 
-    Token first = parser_next(p);
-    if (first.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier in struct body", p->lexer.filename, first.line); }
-    if (kind == STRUCT_KIND_MESSAGE && token_equals(&first, "id")) {
-        parser_expect(p, TOKEN_ASSIGN, "expected '=' after message id");
-        Token value_tok = parser_next(p);
-        if (value_tok.kind != TOKEN_NUMBER) { fatal("%s:%zu: error: expected numeric id default", p->lexer.filename, value_tok.line); }
-        parser_expect(p, TOKEN_SEMICOLON, "expected ';' after id assignment");
-        FieldDef field = {0};
-        field.name = str_dup("id");
-        field.type_name = str_dup("id32");
-        field.is_array = false;
-        field.def = field_default_number((int64_t)token_to_uint64(&value_tok));
-        field.is_deprecated = is_deprecated;
-        return field;
-    }
-    Token type_tok = first;
+    Token type_tok = parser_next(p);
+    if (type_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier in struct body", p->lexer.filename, type_tok.line); }
     bool is_array = false;
     if (parser_match(p, TOKEN_LBRACKET)) {
         parser_expect(p, TOKEN_RBRACKET, "expected ']' after '['");
@@ -766,7 +751,7 @@ static bool type_is_bool(const char *name) { return strcmp(name, "bool") == 0; }
 static bool type_is_u8(const char *name) { return strcmp(name, "u8") == 0; }
 static bool type_is_u64(const char *name) { return strcmp(name, "u64") == 0; }
 static bool type_is_u32_compatible(const char *name) {
-    return strcmp(name, "u16") == 0 || strcmp(name, "u32") == 0 || strcmp(name, "id32") == 0 || strcmp(name, "optr32") == 0;
+    return strcmp(name, "u16") == 0 || strcmp(name, "u32") == 0;
 }
 static bool type_is_signed32(const char *name) {
     return strcmp(name, "i8") == 0 || strcmp(name, "i16") == 0 || strcmp(name, "i32") == 0;
@@ -2674,7 +2659,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "        return true;\n"
         "    }\n"
         "    // Builtins\n"
-        "    if (type_id < 13) {\n"
+        "    if (type_id < 11) {\n"
         "        switch (type_id) {\n"
         "            case 0: // u8\n"
         "            case 4: // i8\n"
@@ -2684,8 +2669,6 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "            case 2: // u32\n"
         "            case 5: // i16\n"
         "            case 6: // i32\n"
-        "            case 11: // optr32\n"
-        "            case 12: // id32\n"
         "            {\n"
         "                uint32_t tmp; return %sread_var_u32(buffer, &tmp);\n"
         "            }\n"
