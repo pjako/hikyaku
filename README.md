@@ -1,6 +1,6 @@
 # hikyaku
 
-`hikyaku`—named after the historic Japanese couriers—is a single-file, public-domain schema compiler that converts a small `.cm` schema language into a C99 header containing struct definitions, buffer helpers, and serialization code. It is tailored for compact network messages where allocating a heavyweight runtime (e.g. Protocol Buffers or FlatBuffers) would be overkill.
+`hikyaku`—named after the historic Japanese couriers—is a single-file, public-domain schema compiler that converts a small `.hischema` schema language into a C99 header containing struct definitions, buffer helpers, and serialization code. It is tailored for compact network messages where allocating a heavyweight runtime (e.g. Protocol Buffers or FlatBuffers) would be overkill.
 
 ## Highlights
 - Generates header-only C APIs and matching binary schema blobs from a single schema file.
@@ -16,7 +16,7 @@ The program is intentionally freestanding—no libraries beyond the C runtime ar
 
 ## Usage
 ```bash
-./schema_gen input.cm output.h [--ignore-compat]
+./schema_gen input.hischema output.h [--ignore-compat]
 ```
 
 This emits:
@@ -36,7 +36,7 @@ If you truly need a breaking change, bump to a new type/message name or supply `
 Define `PREFIX_IMPLEMENTATION` (derived from your schema prefix, see below) in exactly one translation unit before including the header to generate the function bodies.
 
 ## Schema Language
-The `.cm` language is kept deliberately small:
+The `.hischema` language is kept deliberately small:
 
 | Construct | Description |
 |-----------|-------------|
@@ -63,10 +63,10 @@ Messages automatically synthesize an `id` field when `id = <number>;` appears in
 Bit-width annotations now affect both the generated C struct layout and compact wire format: consecutive bit-width scalars are appended bit-by-bit (LSB-first), then padded to the next byte boundary before any following non-bit-width field or at struct end. Optional fields still use the leading presence bitmask, and arrays cannot specify bit widths.
 
 ## Example Schema (feature tour)
-Below is a compact `.cm` file that exercises the language surface—prefixing, aliases, enums with explicit bases, structs vs. messages, optionals, arrays, and bitfields:
+Below is a compact `.hischema` file that exercises the language surface—prefixing, aliases, enums with explicit bases, structs vs. messages, optionals, arrays, and bitfields:
 
-```cm
-// example.cm
+```hischema
+// example.hischema
 prefix courier_
 
 // Remap schema names to C types used in your codebase
@@ -109,7 +109,7 @@ message Envelope {
 }
 ```
 
-Generate the corresponding C99 API and binary schema with `./schema_gen example.cm example.h`; the emitted symbols will be prefixed with `courier_`.
+Generate the corresponding C99 API and binary schema with `./schema_gen example.hischema example.h`; the emitted symbols will be prefixed with `courier_`.
 
 ## Generated Header Layout
 The header stitches several pieces together (guarded by feature macros derived from your prefix, e.g. `GEN_`):

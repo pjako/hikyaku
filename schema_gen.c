@@ -2,7 +2,7 @@
   schema_gen - v0.1 - public domain schema compiler
   
   USAGE:
-    schema_gen <input.cm> <output.h>
+    schema_gen <input.hischema> <output.h>
 
   FEATURES:
     - Generates C99 compliant header-only serialization code.
@@ -3432,7 +3432,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <schema.cm> <output.h> [--ignore-compat]\n", argv[0]);
+        fprintf(stderr, "usage: %s <schema.hischema> <output.h> [--ignore-compat]\n", argv[0]);
         return EXIT_FAILURE;
     }
     bool ignore_compat = false;
@@ -3457,9 +3457,9 @@ int main(int argc, char **argv) {
     char bin_path[1024];
     size_t len = strlen(output_path);
     if (len > 2 && strcmp(output_path + len - 2, ".h") == 0) {
-        snprintf(bin_path, sizeof(bin_path), "%.*s.hibschema", (int)(len - 2), output_path);
+        snprintf(bin_path, sizeof(bin_path), "%.*s.hischemabin", (int)(len - 2), output_path);
     } else {
-        snprintf(bin_path, sizeof(bin_path), "%s.hibschema", output_path);
+        snprintf(bin_path, sizeof(bin_path), "%s.hischemabin", output_path);
     }
 
     if (!ignore_compat && file_exists(bin_path)) {
