@@ -68,6 +68,8 @@
 
 #define ARRAY_GROW_CAP(cap) ((cap) ? ((cap) * 2) : 8)
 
+// MARK: Utility helpers
+
 static void fatal(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
@@ -181,6 +183,8 @@ static void to_upper_str(char *dst, size_t dst_size, const char *src) {
     dst[len] = '\0';
 }
 
+// MARK: Lexing
+
 typedef enum {
     TOKEN_EOF,
     TOKEN_IDENTIFIER,
@@ -196,7 +200,9 @@ typedef enum {
     TOKEN_COMMA,
     TOKEN_ASSIGN,
     TOKEN_DOT,
-    TOKEN_QUESTION
+    TOKEN_QUESTION,
+    TOKEN_LESS,
+    TOKEN_GREATER
 } TokenKind;
 
 typedef struct {
@@ -267,6 +273,8 @@ static Token lexer_next(Lexer *lx) {
         case '=': token.kind = TOKEN_ASSIGN; return token;
         case '.': token.kind = TOKEN_DOT; return token;
         case '?': token.kind = TOKEN_QUESTION; return token;
+        case '<': token.kind = TOKEN_LESS; return token;
+        case '>': token.kind = TOKEN_GREATER; return token;
         default: break;
     }
     if (isalpha((unsigned char)c) || c == '_') {
@@ -334,6 +342,8 @@ static char *token_to_string(const Token *tok) {
     return str_dup_range(tok->start, tok->end);
 }
 
+// MARK: Schema model
+
 typedef struct {
     char *name;
     char *c_type;
@@ -383,9 +393,11 @@ typedef struct {
     bool is_optional;
     bool is_deprecated;
     bool is_removed;
+    bool is_map;
+    char *key_type;
 } FieldDef;
 
-// --- Compatibility checking helpers ---
+// MARK: Compatibility helpers
 
 typedef struct {
     char *name;
@@ -444,6 +456,7 @@ typedef struct {
     ArrayType *arrays;
     size_t array_count;
     size_t array_capacity;
+    bool string_alias_overridden;
 } Schema;
 
 static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro, const StringBuilder *bin_data);
@@ -451,12 +464,15 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
 static const struct { const char *name; const char *ctype; } BUILTIN_ALIASES[] = {
     {"u8", "uint8_t"}, {"u16", "uint16_t"}, {"u32", "uint32_t"}, {"u64", "uint64_t"},
     {"i8", "int8_t"}, {"i16", "int16_t"}, {"i32", "int32_t"}, {"i64", "int64_t"},
-    {"f32", "float"}, {"f64", "double"}, {"bool", "bool"}
+    {"f32", "float"}, {"f64", "double"}, {"bool", "bool"}, {"string", NULL}
 };
+
+static void make_string_typename(char *dst, size_t dst_size, const Schema *schema);
 
 static void schema_init(Schema *schema) {
     memset(schema, 0, sizeof(*schema));
     schema->prefix = str_dup("gen_");
+    schema->string_alias_overridden = false;
     schema->builtin_alias_count = sizeof(BUILTIN_ALIASES) / sizeof(BUILTIN_ALIASES[0]);
     for (size_t i = 0; i < schema->builtin_alias_count; ++i) {
         if (schema->alias_count == schema->alias_capacity) {
@@ -467,7 +483,13 @@ static void schema_init(Schema *schema) {
         }
         TypeAlias *alias = &schema->aliases[schema->alias_count++];
         alias->name = str_dup(BUILTIN_ALIASES[i].name);
-        alias->c_type = str_dup(BUILTIN_ALIASES[i].ctype);
+        if (BUILTIN_ALIASES[i].ctype) {
+            alias->c_type = str_dup(BUILTIN_ALIASES[i].ctype);
+        } else if (strcmp(BUILTIN_ALIASES[i].name, "string") == 0) {
+            char buf[128];
+            make_string_typename(buf, sizeof(buf), schema);
+            alias->c_type = str_dup(buf);
+        }
     }
 }
 
@@ -631,16 +653,31 @@ static bool token_equals(const Token *tok, const char *text) {
     return strlen(text) == len && strncmp(tok->start, text, len) == 0;
 }
 
+static void make_string_typename(char *dst, size_t dst_size, const Schema *schema) {
+    snprintf(dst, dst_size, "%sstr8", schema->prefix);
+}
+
+// MARK: Schema parsing
+
 static void parse_prefix(Parser *p, Schema *schema) {
     Token name = parser_next(p);
     if (name.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier after prefix keyword", p->lexer.filename, name.line); }
     free(schema->prefix);
     schema->prefix = token_to_string(&name);
+    if (!schema->string_alias_overridden) {
+        TypeAlias *alias = schema_find_alias(schema, "string");
+        if (alias) {
+            free(alias->c_type);
+            char buf[128];
+            make_string_typename(buf, sizeof(buf), schema);
+            alias->c_type = str_dup(buf);
+        }
+    }
 }
 
-static void parse_type(Parser *p, Schema *schema) {
+static void parse_gentype(Parser *p, Schema *schema) {
     Token name_tok = parser_next(p);
-    if (name_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier after type keyword", p->lexer.filename, name_tok.line); }
+    if (name_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier after gentype keyword", p->lexer.filename, name_tok.line); }
     Token ctype_tok = parser_next(p);
     if (ctype_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier for type mapping", p->lexer.filename, ctype_tok.line); }
     char *name = token_to_string(&name_tok);
@@ -648,6 +685,7 @@ static void parse_type(Parser *p, Schema *schema) {
     if (existing) {
         free(existing->c_type);
         existing->c_type = token_to_string(&ctype_tok);
+        if (strcmp(name, "string") == 0) { schema->string_alias_overridden = true; }
         free(name);
         return;
     }
@@ -660,6 +698,7 @@ static void parse_type(Parser *p, Schema *schema) {
     TypeAlias *alias_slot = &schema->aliases[schema->alias_count++];
     alias_slot->name = name;
     alias_slot->c_type = token_to_string(&ctype_tok);
+    if (strcmp(name, "string") == 0) { schema->string_alias_overridden = true; }
 }
 
 static void parse_enum(Parser *p, Schema *schema, bool is_bitset) {
@@ -778,8 +817,81 @@ static void parse_struct_field(Parser *p, Schema *schema, StructDef *def, FieldD
 
     Token type_tok = parser_next(p);
     if (type_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier in struct body", p->lexer.filename, type_tok.line); }
+    
+    bool is_map = false;
+    char *key_type = NULL;
+    char *value_type = NULL;
+    if (token_equals(&type_tok, "map")) {
+        is_map = true;
+        parser_expect(p, TOKEN_LESS, "expected '<' after map");
+        Token key_tok = parser_next(p);
+        if (key_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected key type identifier", p->lexer.filename, key_tok.line); }
+        parser_expect(p, TOKEN_COMMA, "expected ',' after key type");
+        Token value_tok = parser_next(p);
+        if (value_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected value type identifier", p->lexer.filename, value_tok.line); }
+        parser_expect(p, TOKEN_GREATER, "expected '>' after value type");
+
+        key_type = token_to_string(&key_tok);
+        value_type = token_to_string(&value_tok);
+        // Synthesize Pair struct used to encode map entries
+        char pair_name[256];
+        char key_title[256];
+        snprintf(key_title, sizeof(key_title), "%s", key_type);
+        if (key_title[0]) key_title[0] = toupper((unsigned char)key_title[0]);
+
+        char val_title[256];
+        snprintf(val_title, sizeof(val_title), "%s", value_type);
+        if (val_title[0]) val_title[0] = toupper((unsigned char)val_title[0]);
+
+        snprintf(pair_name, sizeof(pair_name), "%s%sPair", key_title, val_title);
+
+        bool exists = false;
+        for (size_t i = 0; i < schema->struct_count; ++i) {
+            if (strcmp(schema->structs[i].name, pair_name) == 0) {
+                exists = true;
+                break;
+            }
+        }
+        
+        if (!exists) {
+            StructDef pair_def = {0};
+            pair_def.name = str_dup(pair_name);
+            pair_def.kind = STRUCT_KIND_STRUCT;
+            pair_def.line = type_tok.line;
+
+            FieldDef key_field = {0};
+            key_field.name = str_dup("key");
+            key_field.type_name = key_type;
+            key_field.line = type_tok.line;
+            key_field.has_field_id = true;
+            key_field.field_id = 0;
+            key_field.def = field_default_none();
+            schema_add_field(schema, &pair_def, key_field);
+            
+            FieldDef val_field = {0};
+            val_field.name = str_dup("value");
+            val_field.type_name = value_type;
+            val_field.line = type_tok.line;
+            val_field.has_field_id = true;
+            val_field.field_id = 1;
+            val_field.def = field_default_none();
+            schema_add_field(schema, &pair_def, val_field);
+            
+            if (schema->struct_count == schema->struct_capacity) {
+                size_t new_cap = ARRAY_GROW_CAP(schema->struct_capacity);
+                schema->structs = (StructDef *)realloc(schema->structs, new_cap * sizeof(StructDef));
+                if (!schema->structs) { fatal("schema_gen: out of memory while growing structs"); }
+                schema->struct_capacity = new_cap;
+            }
+            schema->structs[schema->struct_count++] = pair_def;
+        } else {
+            free(value_type);
+        }
+    }
+
     bool is_array = false;
     if (parser_match(p, TOKEN_LBRACKET)) {
+        if (is_map) { fatal("%s:%zu: error: maps cannot be arrays", p->lexer.filename, type_tok.line); }
         parser_expect(p, TOKEN_RBRACKET, "expected ']' after '['");
         is_array = true;
     }
@@ -787,6 +899,7 @@ static void parse_struct_field(Parser *p, Schema *schema, StructDef *def, FieldD
     if (name_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected field name", p->lexer.filename, name_tok.line); }
     bool is_optional = false;
     if (parser_match(p, TOKEN_QUESTION)) {
+        if (is_map) { fatal("%s:%zu: error: maps cannot be optional", p->lexer.filename, type_tok.line); }
         is_optional = true;
     }
 
@@ -834,8 +947,28 @@ static void parse_struct_field(Parser *p, Schema *schema, StructDef *def, FieldD
     parser_expect(p, TOKEN_SEMICOLON, "expected ';' after field");
     FieldDef field = {0};
     field.name = token_to_string(&name_tok);
-    field.type_name = token_to_string(&type_tok);
-    field.is_array = is_array;
+    if (is_map) {
+        char key_title[256];
+        snprintf(key_title, sizeof(key_title), "%s", key_type);
+        if (key_title[0]) key_title[0] = toupper((unsigned char)key_title[0]);
+        
+        char val_title[256];
+        snprintf(val_title, sizeof(val_title), "%s", value_type);
+        if (val_title[0]) val_title[0] = toupper((unsigned char)val_title[0]);
+
+        char pair_name[256];
+        snprintf(pair_name, sizeof(pair_name), "%s%sPair", key_title, val_title);
+        
+        field.type_name = str_dup(pair_name);
+        field.is_array = true; // Map is encoded as an array of key/value pairs
+        field.is_map = true;
+        field.key_type = key_type;
+    } else {
+        field.type_name = token_to_string(&type_tok);
+        field.is_array = is_array;
+        field.is_map = false;
+    }
+    
     field.has_field_id = has_field_id;
     field.field_id = field_id;
     field.def = field_default_none();
@@ -892,10 +1025,13 @@ static void parse_schema(Parser *p, Schema *schema) {
             parse_prefix(p, schema);
             continue;
         }
-        if (token_equals(&tok, "type")) {
+        if (token_equals(&tok, "gentype")) {
             parser_next(p);
-            parse_type(p, schema);
+            parse_gentype(p, schema);
             continue;
+        }
+        if (token_equals(&tok, "type")) {
+            fatal("%s:%zu: error: 'type' has been renamed to 'gentype' (use 'gentype <schema_type> <c_type>')", p->lexer.filename, tok.line);
         }
         if (token_equals(&tok, "enum")) {
             parser_next(p);
@@ -957,7 +1093,7 @@ static void make_prefixed(char *dst, size_t dst_size, const Schema *schema, cons
 }
 
 static void make_array_name(char *dst, size_t dst_size, const Schema *schema, const char *element) {
-    snprintf(dst, dst_size, "%sArray%s", schema->prefix, element);
+    snprintf(dst, dst_size, "%s%sArray", schema->prefix, element);
 }
 
 static void make_enum_value_name(char *dst, size_t dst_size, const Schema *schema, const char *enum_name, const char *value) {
@@ -982,6 +1118,7 @@ static bool type_is_signed32(const char *name) {
 static bool type_is_signed64(const char *name) { return strcmp(name, "i64") == 0; }
 static bool type_is_f32(const char *name) { return strcmp(name, "f32") == 0; }
 static bool type_is_f64(const char *name) { return strcmp(name, "f64") == 0; }
+static bool type_is_string(const char *name) { return strcmp(name, "string") == 0; }
 
 static const char *c_type_for(const Schema *schema, const char *type_name, char *buffer, size_t buffer_size, size_t line) {
     const TypeAlias *alias = find_alias_const(schema, type_name);
@@ -1010,6 +1147,8 @@ static bool base_type_is_signed(const char *base_type) {
 static bool base_type_is_integer(const char *base_type) {
     return type_is_u8(base_type) || type_is_u32_compatible(base_type) || type_is_u64(base_type) || base_type_is_signed(base_type);
 }
+
+// MARK: Compact codec generation
 
 static void validate_bit_width(const Schema *schema, const FieldDef *field, const char *base_type) {
     if (field->bit_width == 0) { return; }
@@ -1083,6 +1222,10 @@ static void append_scalar_encode(StringBuilder *out, const Schema *schema, const
         sb_append(out, "%sif (!%swrite_compact_f32(buffer, %s)) { return false; }\n", emit_indent, p, value_ref);
     } else if (type_is_f64(base_type)) {
         sb_append(out, "%sif (!%swrite_compact_f64(buffer, %s)) { return false; }\n", emit_indent, p, value_ref);
+    } else if (type_is_f64(base_type)) {
+        sb_append(out, "%sif (!%swrite_compact_f64(buffer, %s)) { return false; }\n", emit_indent, p, value_ref);
+    } else if (type_is_string(base_type)) {
+        sb_append(out, "%sif (!%sbuffer_write_string(buffer, &%s)) { return false; }\n", emit_indent, p, value_ref);
     } else {
         fatal("schema_gen: unsupported scalar type '%s' for compact encoding", base_type);
     }
@@ -1149,6 +1292,10 @@ static void append_scalar_decode(StringBuilder *out, const Schema *schema, const
         sb_append(out, "%sif (!%sread_compact_f32(buffer, &%s)) { %s }\n", emit_indent, p, target_ref, fail);
     } else if (type_is_f64(base_type)) {
         sb_append(out, "%sif (!%sread_compact_f64(buffer, &%s)) { %s }\n", emit_indent, p, target_ref, fail);
+    } else if (type_is_f64(base_type)) {
+        sb_append(out, "%sif (!%sread_compact_f64(buffer, &%s)) { %s }\n", emit_indent, p, target_ref, fail);
+    } else if (type_is_string(base_type)) {
+        sb_append(out, "%sif (!%sbuffer_read_string(buffer, memory, &%s)) { %s }\n", emit_indent, p, target_ref, fail);
     } else {
         fatal("schema_gen: unsupported scalar type '%s' for compact decoding", base_type);
     }
@@ -1733,6 +1880,8 @@ static void append_compact_codecs(StringBuilder *decls, StringBuilder *impl, con
     }
 }
 
+// MARK: Buffer and wire helpers
+
 static void append_memory_buffer(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
     sb_append(decls,
         "typedef struct %sBuffer {\n"
@@ -1742,6 +1891,17 @@ static void append_memory_buffer(StringBuilder *decls, StringBuilder *impl, cons
         "} %sBuffer;\n\n"
         "typedef struct %sSchemaInfo %sSchemaInfo;\n\n",
         schema->prefix, schema->prefix, schema->prefix, schema->prefix);
+
+    if (!schema->string_alias_overridden) {
+        char str_type[128];
+        make_string_typename(str_type, sizeof(str_type), schema);
+        sb_append(decls,
+            "typedef struct %s {\n"
+            "    uint8_t *content;\n"
+            "    uint64_t size;\n"
+            "} %s;\n\n",
+            str_type, str_type);
+    }
     
     sb_append(decls, "%s void %sbuffer_init(%sBuffer *buffer, void *ptr, uint32_t size);\n", api_macro, schema->prefix, schema->prefix);
     sb_append(impl,
@@ -1801,8 +1961,12 @@ static void append_memory_buffer(StringBuilder *decls, StringBuilder *impl, cons
 }
 
 static void append_buffer_helpers(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
+    // Pointer aliases (e.g., string/char*) need custom handling; skip them here.
+    // 'string' is emitted via append_string_helpers below.
     for (size_t i = 0; i < schema->alias_count; ++i) {
         const TypeAlias *alias = &schema->aliases[i];
+        if (strcmp(alias->name, "string") == 0) { continue; }
+        if (strchr(alias->c_type, '*')) { continue; }
         const char *swap_func = NULL;
         if (strcmp(alias->c_type, "uint16_t") == 0 || strcmp(alias->c_type, "int16_t") == 0) {
             swap_func = "bswap16";
@@ -1854,6 +2018,40 @@ static void append_buffer_helpers(StringBuilder *decls, StringBuilder *impl, con
                 schema->prefix, alias->name, schema->prefix, alias->c_type, schema->prefix);
         }
     }
+}
+
+static void append_string_helpers(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
+    const TypeAlias *alias = find_alias_const(schema, "string");
+    if (!alias) { return; }
+    char str_type[256];
+    snprintf(str_type, sizeof(str_type), "%s", alias->c_type);
+
+    sb_append(impl,
+        "bool %sbuffer_read_string(%sBuffer *buffer, %sBuffer *memory, %s *out) {\n"
+        "    if (!memory) { return false; }\n"
+        "    uint32_t len = 0;\n"
+        "    if (!%sread_var_u32(buffer, &len)) { return false; }\n"
+        "    if (buffer->used + len > buffer->size) { return false; }\n"
+        "    uint8_t *str = (uint8_t *)%sbuffer_push_aligned(memory, (size_t)len + 1, 1);\n"
+        "    if (!str) { return false; }\n"
+        "    if (!%sbuffer_read_bytes(buffer, str, len)) { return false; }\n"
+        "    str[len] = 0;\n"
+        "    out->content = str;\n"
+        "    out->size = len;\n"
+        "    return true;\n"
+        "}\n",
+        schema->prefix, schema->prefix, schema->prefix, str_type, schema->prefix, schema->prefix, schema->prefix);
+
+    sb_append(impl,
+        "bool %sbuffer_write_string(%sBuffer *buffer, const %s *value) {\n"
+        "    uint64_t len = value ? value->size : 0;\n"
+        "    if (len > UINT32_MAX) { return false; }\n"
+        "    if (!%swrite_var_u32(buffer, (uint32_t)len)) { return false; }\n"
+        "    if (len == 0) { return true; }\n"
+        "    if (!value->content) { return false; }\n"
+        "    return %sbuffer_write_bytes(buffer, value->content, (size_t)len);\n"
+        "}\n\n",
+        schema->prefix, schema->prefix, str_type, schema->prefix, schema->prefix);
 }
 
 static void append_wire_helpers(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
@@ -2246,6 +2444,8 @@ static void append_compact_helpers(StringBuilder *decls, StringBuilder *impl, co
         p, p, p, p, p, p, p, p, p, p, p, p, p, p, p);
 }
 
+// MARK: Type definitions
+
 static void append_enum_defs(StringBuilder *out, const Schema *schema) {
     for (size_t i = 0; i < schema->enum_count; ++i) {
         const EnumDef *def = &schema->enums[i];
@@ -2521,7 +2721,11 @@ static void append_struct_io(StringBuilder *decls, StringBuilder *impl, const Sc
                     append_bit_width_assign(impl, schema, field, "temp", target, bw_indent);
                     sb_append(impl, "%s}\n", indent);
                 } else {
-                    sb_append(impl, "%sif (!%sbuffer_read_%s(buffer, &value->%s)) { return false; }\n", indent, schema->prefix, field->type_name, field->name);
+                    if (type_is_string(field_base_type(schema, field))) {
+                        sb_append(impl, "%sif (!%sbuffer_read_string(buffer, memory, &value->%s)) { return false; }\n", indent, schema->prefix, field->name);
+                    } else {
+                        sb_append(impl, "%sif (!%sbuffer_read_%s(buffer, &value->%s)) { return false; }\n", indent, schema->prefix, field->type_name, field->name);
+                    }
                 }
             } else {
                 char nested[256];
@@ -2605,7 +2809,11 @@ static void append_struct_io(StringBuilder *decls, StringBuilder *impl, const Sc
                     sb_append(impl, "%s    if (!%sbuffer_write_%s(buffer, temp)) { return false; }\n", indent, schema->prefix, field->type_name);
                     sb_append(impl, "%s}\n", indent);
                 } else {
-                    sb_append(impl, "%sif (!%sbuffer_write_%s(buffer, value->%s)) { return false; }\n", indent, schema->prefix, field->type_name, field->name);
+                    if (type_is_string(field_base_type(schema, field))) {
+                        sb_append(impl, "%sif (!%sbuffer_write_string(buffer, &value->%s)) { return false; }\n", indent, schema->prefix, field->name);
+                    } else {
+                        sb_append(impl, "%sif (!%sbuffer_write_%s(buffer, value->%s)) { return false; }\n", indent, schema->prefix, field->type_name, field->name);
+                    }
                 }
             } else {
                 char nested[256];
@@ -2795,6 +3003,7 @@ static void generate_header(const Schema *schema, const char *input_path, const 
     append_memory_buffer(&out, &impl, schema, api_macro);
     append_buffer_helpers(&out, &impl, schema, api_macro);
     append_wire_helpers(&out, &impl, schema, api_macro);
+    append_string_helpers(&out, &impl, schema, api_macro);
     append_compact_helpers(&out, &impl, schema, api_macro);
     append_struct_forward(&out, schema);
     append_array_forward(&out, schema);
@@ -2824,7 +3033,7 @@ static void generate_header(const Schema *schema, const char *input_path, const 
     free(impl.data);
 }
 
-// --- Binary Schema Generation ---
+// MARK: Binary schema generation
 
 #define BINARY_MAGIC "BKIW"
 #define BINARY_VERSION 3
@@ -3114,6 +3323,9 @@ static void check_backward_compatibility(const char *existing_path, const Schema
         }
     }
 }
+
+// MARK: Runtime schema support
+
 static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro, const StringBuilder *bin_data) {
     // Embed binary schema
     sb_append(impl, "#define %sBINARY_MAGIC \"BKIW\"\n", schema->prefix);
@@ -3353,15 +3565,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    \n"
         "    // STRUCT or MESSAGE\n"
         "    if (type->kind == 2) { // MESSAGE\n"
-        "        // Messages are length delimited in some contexts, but here we assume compact stream\n"
-        "        // Wait, messages in compact encoding are just structs with ID field.\n"
-        "        // But wait, `append_message_codec` uses `write_wire_tag` and blocks for optional fields.\n"
-        "        // If we are skipping a message in a compact stream, it might be encoded as a struct (recursively) OR as a block.\n"
-        "        // In `append_struct_codec`, nested structs are just `_encode_compact`.\n"
-        "        // In `append_message_codec`, nested structs are `_encode_compact`.\n"
-        "        // So they are just fields.\n"
-        "        // BUT, `append_message_codec` writes a 0 tag at the end.\n"
-        "        // So we need to skip until tag 0.\n"
+        "        // Messages are length-delimited; skip fields until the terminator tag.\n"
         "        while (true) {\n"
         "            uint32_t field_id = 0;\n"
         "            %sWireType wire = %sWireType_Varint;\n"
@@ -3373,7 +3577,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    }\n"
         "    \n"
         "    // STRUCT\n"
-        "    // Read bitmask\n"
+        "    // Read bitmask for optional fields\n"
         "    uint32_t optional_count = 0;\n"
         "    bool has_bitfields = false;\n"
         "    for (uint32_t i = 0; i < type->field_count; ++i) {\n"
@@ -3385,16 +3589,6 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    uint8_t *bitmask = NULL;\n"
         "    if (optional_count > 0) {\n"
         "        uint32_t bytes = (optional_count + 7) / 8;\n"
-        "        // We need to read bytes but not store them permanently, just on stack or skip\n"
-        "        // But we need them to know which optionals to skip.\n"
-        "        // We can allocate on stack if small, or use allocator? No allocator passed here.\n"
-        "        // Use a small fixed buffer or alloca? standard C99 doesn't have alloca.\n"
-        "        // Let's use a fixed max size (e.g. 64 bytes = 512 optionals) or just read byte by byte?\n"
-        "        // We can't read byte by byte easily because we need random access or sequential access.\n"
-        "        // Sequential access is fine. We iterate fields.\n"
-        "        // But the bitmask is at the START.\n"
-        "        // So we must read it all.\n"
-        "        // Let's assume a max of 128 bytes (1024 optionals). If more, fail.\n"
         "        if (bytes > 128) return false;\n"
         "        uint8_t mask_buf[128];\n"
         "        if (!%sbuffer_read_bytes(buffer, mask_buf, bytes)) return false;\n"

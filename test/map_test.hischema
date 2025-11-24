@@ -1,0 +1,11 @@
+prefix gen_
+
+struct Achievement {
+  u32 achievementId;
+}
+
+message Player {
+  u32 id = 1;
+  Achievement[] colors = 4;
+  map<string, Achievement> achievements = 8;
+}

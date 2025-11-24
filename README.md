@@ -41,11 +41,14 @@ The `.hischema` language is kept deliberately small:
 | Construct | Description |
 |-----------|-------------|
 | `prefix foo_` | Sets the C symbol prefix (`foo_` by default). |
-| `type logical u32` | Adds/replaces a type alias that maps schema names to C types. |
+| `gentype logical u32` | Overrides the generated C type used for a schema type (`logical` stays the schema name, `u32` becomes the emitted C type). |
 | `enum Color { red, green, blue=5 }` | Declares enums (optional base type via `enum Kind : u16`). |
 | `bitset Flags : u16 { a, b=4, c }` | Declares a flag set with single-bit values on an unsigned base (u8/u16/u32/u64). |
 | `struct Packet { ... }` | Declares POD structs encoded compactly. |
 | `message Ping { ... }` | Similar to `struct`, but when encoded in Standard mode each field is tagged (`id = N` fields reserve IDs). |
+| `map<string, Value> entries;` | Declares a map; expands to an array of synthesized `<Key><Value>Pair` structs (see Maps below). |
+
+`gentype` only changes the emitted C type; the schema still refers to the logical name (`logical` in the table above), so wire layouts and runtime metadata remain unchanged while you plug in your own typedefs.
 
 Within structs/messages:
 - Arrays: `u8[] payload;`
@@ -62,6 +65,9 @@ Messages automatically synthesize an `id` field when `id = <number>;` appears in
 
 Bit-width annotations now affect both the generated C struct layout and compact wire format: consecutive bit-width scalars are appended bit-by-bit (LSB-first), then padded to the next byte boundary before any following non-bit-width field or at struct end. Optional fields still use the leading presence bitmask, and arrays cannot specify bit widths.
 
+### Maps
+`map<key, value> field = N;` is syntactic sugar for an array of key/value structs. The generator synthesizes a `<Key><Value>Pair` struct containing `key` and `value` members plus an `Array<Key><Value>Pair` wrapper, and the field becomes an array of those pairs. Maps are length-delimited arrays (count + items) in both Standard and Compact codecs, keep insertion order, and may contain duplicate keys. Constraints: maps cannot be optional or nested inside arrays (`map<>?` and `map<>[]` are rejected). Keys/values follow the same type rules as normal fields (builtins, enums, aliases, or other structs/messages).
+
 ## Example Schema (feature tour)
 Below is a compact `.hischema` file that exercises the language surface—prefixing, aliases, enums with explicit bases, structs vs. messages, optionals, arrays, and bitfields:
 
@@ -69,9 +75,9 @@ Below is a compact `.hischema` file that exercises the language surface—prefix
 // example.hischema
 prefix courier_
 
-// Remap schema names to C types used in your codebase
-type handle u32
-type coord i32
+// Remap schema names to the C types used in your codebase
+gentype handle u32
+gentype coord i32
 
 enum Status : u8 {
   ok = 0,

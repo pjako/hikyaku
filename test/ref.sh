@@ -9,3 +9,8 @@ cc -std=c99 -O2 -o ref ref.c
 
 cc -std=c99 -O2 -o ref_ext ref_ext.c
 ./ref_ext
+
+./schema_gen map_test.hischema map_test.h
+
+cc -std=c99 -O2 -o map_test map_test.c
+./map_test

@@ -1,7 +1,7 @@
 prefix gen_
-type i32 i32
-type u32 u32
-type f32 f32
+gentype i32 i32
+gentype u32 u32
+gentype f32 f32
 
 enum Class : u32 {
   fighter = 0,
@@ -10,10 +10,11 @@ enum Class : u32 {
 }
 
 struct Achievements {
-  u8 red;
-  u8 green;
-  u8 blue;
-  u8 alpha;
+  u32 questsCompleted;
+  u32 bossesDefeated;
+  u16 secretsFound;
+  u8 rank;
+  u8 prestigeLevel;
 }
 
 struct PlayerState {
@@ -45,8 +46,31 @@ message Player {
   u32 id = 1;
   PlayerFlags flags = 2;
   Class class = 3;
-  Achievements[] colors = 4;
-  [removed] u32 extraSeq = 5;
-  [deprecated] u32 extraSeq2 = 6;
+  Achievements[] achievements = 4;
   u32 extraSeq3 = 7;
+
+  // Maybe have this as key value pair
+  map<string, Achievements> map = 8;
+
+// In C code this map would look like this
+// struct <prefix>StringAchievementPair {
+//   string key;
+//   Achievement value;
+// }
+// struct <prefix>StringAchievementPairArray {
+//   uint32_t count;
+//   <prefix>StringAchievementPair* items;
+// }
+// The player message would look like this in C
+// struct <prefix>Player {
+//   /*...*/
+//   <prefix>StringAchievementPairArray map;
+//   /*...*/
+// }
+
+
+  // deprecated properties
+  [deprecated] u32 extraSeq2 = 6;
+  // removed properties
+  [removed] u32 extraSeq = 5;
 }

@@ -1,0 +1,31 @@
+
+bitset GameHeaderFlags : u16 {
+    reliable,  // Has data that must be acked & resent
+    hasAcks,  // This packet carries ack info
+    isFragment,  // Payload is a fragment of a larger message
+    firstFragment,  // First fragment of message
+    lastFragment,  // Last fragment of message
+    isCompressed,  // Payload is compressed
+    isEncrypted,  // Payload is encrypted
+    keepalive,  // No game data, just ping/keepalive
+    connectionless,  // Out-of-band (status, auth, etc.)
+    // isVoiceData,  // Voice data rather than game state
+}
+
+enum GameMessageType : u16 {
+    login,
+    logout,
+    chat,
+    move,
+    attack,
+}
+
+struct GameHeader {
+    GameHeaderFlags flags;
+    u32 sequenceId;   // send-side sequence
+    u32 ackId;        // highest received sequence from peer
+    u32 ackBits;      // 32-bit history window of acks
+    u16 channelId;    // optional logical channel
+    GameMessageType messageType;
+    u16 payloadSize;
+}

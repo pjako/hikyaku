@@ -26,18 +26,18 @@ typedef double   f64;
 #include "ref.h"
 
 int main() {
-    gen_Achievements colors[2] = {
-        {.red = 33, .green = 44, .blue = 55, .alpha = 22},
-        {.red = 1, .green = 2, .blue = 3, .alpha = 4}
+    gen_Achievements achievements[2] = {
+        {.questsCompleted = 12, .bossesDefeated = 2, .secretsFound = 5, .rank = 3, .prestigeLevel = 1},
+        {.questsCompleted = 34, .bossesDefeated = 5, .secretsFound = 9, .rank = 4, .prestigeLevel = 0}
     };
     gen_Player player = {0};
     player.has_id = true;
     player.id = 22;
     player.has_class = true;
     player.class = gen_Class_fighter;
-    player.has_colors = true;
-    player.colors.count = (uint32_t)countOf(colors);
-    player.colors.items = colors;
+    player.has_achievements = true;
+    player.achievements.count = (uint32_t)countOf(achievements);
+    player.achievements.items = achievements;
 
     uint8_t schemaStorage[1024*1024];
     gen_Buffer schemaBuffer;
@@ -64,12 +64,13 @@ int main() {
         return 1;
     }
 
-    printf("Decoded Player -> id=%u class=%d colors=%u\n",
-           (unsigned)decoded.id, (int)decoded.class, (unsigned)decoded.colors.count);
-    for (uint32_t i = 0; i < decoded.colors.count; ++i) {
-        const gen_Achievements *c = &decoded.colors.items[i];
-        printf("  Achievement %u: r=%u g=%u b=%u a=%u\n",
-               (unsigned)i, (unsigned)c->red, (unsigned)c->green, (unsigned)c->blue, (unsigned)c->alpha);
+    printf("Decoded Player -> id=%u class=%d achievements=%u\n",
+           (unsigned)decoded.id, (int)decoded.class, (unsigned)decoded.achievements.count);
+    for (uint32_t i = 0; i < decoded.achievements.count; ++i) {
+        const gen_Achievements *a = &decoded.achievements.items[i];
+        printf("  Achievement %u: quests=%u bosses=%u secrets=%u rank=%u prestige=%u\n",
+               (unsigned)i, (unsigned)a->questsCompleted, (unsigned)a->bossesDefeated,
+               (unsigned)a->secretsFound, (unsigned)a->rank, (unsigned)a->prestigeLevel);
     }
 
     return 0;
