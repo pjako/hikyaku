@@ -1292,15 +1292,7 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
     
     // STRUCT or MESSAGE
     if (type->kind == 2) { // MESSAGE
-        // Messages are length delimited in some contexts, but here we assume compact stream
-        // Wait, messages in compact encoding are just structs with ID field.
-        // But wait, `append_message_codec` uses `write_wire_tag` and blocks for optional fields.
-        // If we are skipping a message in a compact stream, it might be encoded as a struct (recursively) OR as a block.
-        // In `append_struct_codec`, nested structs are just `_encode_compact`.
-        // In `append_message_codec`, nested structs are `_encode_compact`.
-        // So they are just fields.
-        // BUT, `append_message_codec` writes a 0 tag at the end.
-        // So we need to skip until tag 0.
+        // Messages are length-delimited; skip fields until the terminator tag.
         while (true) {
             uint32_t field_id = 0;
             gen_WireType wire = gen_WireType_Varint;
@@ -1312,7 +1304,7 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
     }
     
     // STRUCT
-    // Read bitmask
+    // Read bitmask for optional fields
     uint32_t optional_count = 0;
     bool has_bitfields = false;
     for (uint32_t i = 0; i < type->field_count; ++i) {
@@ -1324,16 +1316,6 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
     uint8_t *bitmask = NULL;
     if (optional_count > 0) {
         uint32_t bytes = (optional_count + 7) / 8;
-        // We need to read bytes but not store them permanently, just on stack or skip
-        // But we need them to know which optionals to skip.
-        // We can allocate on stack if small, or use allocator? No allocator passed here.
-        // Use a small fixed buffer or alloca? standard C99 doesn't have alloca.
-        // Let's use a fixed max size (e.g. 64 bytes = 512 optionals) or just read byte by byte?
-        // We can't read byte by byte easily because we need random access or sequential access.
-        // Sequential access is fine. We iterate fields.
-        // But the bitmask is at the START.
-        // So we must read it all.
-        // Let's assume a max of 128 bytes (1024 optionals). If more, fail.
         if (bytes > 128) return false;
         uint8_t mask_buf[128];
         if (!gen_buffer_read_bytes(buffer, mask_buf, bytes)) return false;
