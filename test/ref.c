@@ -30,8 +30,7 @@ int main() {
         {.red = 33, .green = 44, .blue = 55, .alpha = 22},
         {.red = 1, .green = 2, .blue = 3, .alpha = 4}
     };
-    gen_Player player;
-    gen_Player_defaults(&player);
+    gen_Player player = {0};
     player.has_id = true;
     player.id = 22;
     player.has_class = true;
@@ -59,8 +58,7 @@ int main() {
     uint8_t memory_storage[256];
     gen_Buffer memory_buffer;
     gen_buffer_init(&memory_buffer, memory_storage, countOf(memory_storage));
-    gen_Player decoded;
-    gen_Player_defaults(&decoded);
+    gen_Player decoded = {0};
     if (!gen_Player_decode_compact(&decoded, &read_buffer, &memory_buffer, schemaInfo)) {
         fputs("decoding failed\n", stderr);
         return 1;

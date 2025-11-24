@@ -29,8 +29,7 @@ static int test_example_roundtrip(const gen_SchemaInfo *schema) {
         {.red = 20, .green = 30, .blue = 40, .alpha = 50},
         {.red = 200, .green = 150, .blue = 100, .alpha = 50},
     };
-    gen_Player player;
-    gen_Player_defaults(&player);
+    gen_Player player = {0};
     player.has_id = true;
     player.id = 77;
     player.has_class = true;
@@ -50,8 +49,7 @@ static int test_example_roundtrip(const gen_SchemaInfo *schema) {
     gen_Buffer mem;
     init_buf(&mem, arena, sizeof(arena));
 
-    gen_Player decoded;
-    gen_Player_defaults(&decoded);
+    gen_Player decoded = {0};
     CHECK(gen_Player_decode_compact(&decoded, &r, &mem, schema));
 
     CHECK(decoded.id == 77);
@@ -63,8 +61,7 @@ static int test_example_roundtrip(const gen_SchemaInfo *schema) {
 }
 
 static int test_entity_state_optionals(const gen_SchemaInfo *schema) {
-    gen_PlayerState state;
-    gen_PlayerState_defaults(&state);
+    gen_PlayerState state = {0};
     state.has_yaw = true;
     state.yaw = 17;
     state.has_posX = true;
@@ -78,8 +75,7 @@ static int test_entity_state_optionals(const gen_SchemaInfo *schema) {
     init_buf(&w, encoded, sizeof(encoded));
     CHECK(gen_PlayerState_encode_compact(&state, &w, schema));
 
-    gen_PlayerState decoded;
-    gen_PlayerState_defaults(&decoded);
+    gen_PlayerState decoded = {0};
     gen_Buffer r;
     init_buf(&r, encoded, w.used);
     uint8_t arena[128];
@@ -123,8 +119,7 @@ static int test_array_read_write(const gen_SchemaInfo *schema) {
 
 static int test_skip_generic(const gen_SchemaInfo *schema) {
     gen_Achievements colors[1] = { {.red = 9, .green = 9, .blue = 9, .alpha = 9} };
-    gen_Player player;
-    gen_Player_defaults(&player);
+    gen_Player player = {0};
     player.has_id = true;
     player.id = 123;
     player.has_colors = true;

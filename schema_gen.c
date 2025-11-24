@@ -189,6 +189,8 @@ typedef enum {
     TOKEN_RBRACE,
     TOKEN_LBRACKET,
     TOKEN_RBRACKET,
+    TOKEN_LPAREN,
+    TOKEN_RPAREN,
     TOKEN_COLON,
     TOKEN_SEMICOLON,
     TOKEN_COMMA,
@@ -257,6 +259,8 @@ static Token lexer_next(Lexer *lx) {
         case '}': token.kind = TOKEN_RBRACE; return token;
         case '[': token.kind = TOKEN_LBRACKET; return token;
         case ']': token.kind = TOKEN_RBRACKET; return token;
+        case '(': token.kind = TOKEN_LPAREN; return token;
+        case ')': token.kind = TOKEN_RPAREN; return token;
         case ':': token.kind = TOKEN_COLON; return token;
         case ';': token.kind = TOKEN_SEMICOLON; return token;
         case ',': token.kind = TOKEN_COMMA; return token;
@@ -371,11 +375,14 @@ typedef struct {
     char *name;
     char *type_name;
     bool is_array;
+    bool has_field_id;
+    uint32_t field_id;
     FieldDefault def;
     size_t line;
     uint32_t bit_width;
     bool is_optional;
     bool is_deprecated;
+    bool is_removed;
 } FieldDef;
 
 // --- Compatibility checking helpers ---
@@ -387,6 +394,7 @@ typedef struct {
     bool is_array;
     bool is_optional;
     bool is_deprecated;
+    bool is_removed;
     uint32_t bit_width;
 } CompatField;
 
@@ -409,6 +417,9 @@ typedef struct {
     FieldDef *fields;
     size_t field_count;
     size_t field_capacity;
+    FieldDef *removed_fields;
+    size_t removed_count;
+    size_t removed_capacity;
     size_t line;
 } StructDef;
 
@@ -487,6 +498,39 @@ static void schema_add_array(Schema *schema, const char *element_type, size_t li
     schema->array_count++;
 }
 
+static void ensure_unique_field_id(const Schema *schema, const StructDef *st, uint32_t field_id, size_t line, const char *name) {
+    for (size_t i = 0; i < st->field_count; ++i) {
+        if (st->fields[i].has_field_id && st->fields[i].field_id == field_id) {
+            fatal("%s:%zu: error: duplicate field id %u in %s '%s' (field '%s' conflicts with '%s' at line %zu)",
+                  schema && schema->filename ? schema->filename : "(unknown file)", line, field_id,
+                  st->kind == STRUCT_KIND_MESSAGE ? "message" : "struct",
+                  st->name, name, st->fields[i].name, st->fields[i].line);
+        }
+    }
+    for (size_t i = 0; i < st->removed_count; ++i) {
+        if (st->removed_fields[i].has_field_id && st->removed_fields[i].field_id == field_id) {
+            fatal("%s:%zu: error: field id %u in %s '%s' for '%s' conflicts with removed id declared at line %zu",
+                  schema && schema->filename ? schema->filename : "(unknown file)", line, field_id,
+                  st->kind == STRUCT_KIND_MESSAGE ? "message" : "struct",
+                  st->name, name, st->removed_fields[i].line);
+        }
+    }
+}
+
+static void schema_add_removed_field(const Schema *schema, StructDef *st, FieldDef field) {
+    if (!field.has_field_id) {
+        fatal("%s:%zu: error: removed field '%s' must specify an explicit id", schema && schema->filename ? schema->filename : "(unknown file)", field.line, field.name);
+    }
+    ensure_unique_field_id(schema, st, field.field_id, field.line, field.name);
+    if (st->removed_count == st->removed_capacity) {
+        size_t new_cap = ARRAY_GROW_CAP(st->removed_capacity);
+        st->removed_fields = (FieldDef *)realloc(st->removed_fields, new_cap * sizeof(FieldDef));
+        if (!st->removed_fields) { fatal("schema_gen: out of memory while growing removed fields"); }
+        st->removed_capacity = new_cap;
+    }
+    st->removed_fields[st->removed_count++] = field;
+}
+
 static void schema_add_field(const Schema *schema, StructDef *st, FieldDef field) {
     for (size_t i = 0; i < st->field_count; ++i) {
         if (strcmp(st->fields[i].name, field.name) == 0) {
@@ -496,6 +540,15 @@ static void schema_add_field(const Schema *schema, StructDef *st, FieldDef field
                   st->name, st->fields[i].line);
         }
     }
+    if (st->kind == STRUCT_KIND_MESSAGE) {
+        if (!field.has_field_id) {
+            fatal("%s:%zu: error: missing field id for message field '%s'", schema && schema->filename ? schema->filename : "(unknown file)", field.line, field.name);
+        }
+        ensure_unique_field_id(schema, st, field.field_id, field.line, field.name);
+    } else {
+        field.field_id = (uint32_t)st->field_count;
+        field.has_field_id = true;
+    }
     if (st->field_count == st->field_capacity) {
         size_t new_cap = ARRAY_GROW_CAP(st->field_capacity);
         st->fields = (FieldDef *)realloc(st->fields, new_cap * sizeof(FieldDef));
@@ -503,6 +556,33 @@ static void schema_add_field(const Schema *schema, StructDef *st, FieldDef field
         st->field_capacity = new_cap;
     }
     st->fields[st->field_count++] = field;
+}
+
+static const FieldDef *struct_find_field_by_id(const StructDef *st, uint32_t field_id) {
+    for (size_t i = 0; i < st->field_count; ++i) {
+        if (st->fields[i].has_field_id && st->fields[i].field_id == field_id) {
+            return &st->fields[i];
+        }
+    }
+    return NULL;
+}
+
+static const FieldDef *struct_find_field_by_name(const StructDef *st, const char *name) {
+    for (size_t i = 0; i < st->field_count; ++i) {
+        if (strcmp(st->fields[i].name, name) == 0) {
+            return &st->fields[i];
+        }
+    }
+    return NULL;
+}
+
+static bool struct_has_removed_id(const StructDef *st, uint32_t field_id) {
+    for (size_t i = 0; i < st->removed_count; ++i) {
+        if (st->removed_fields[i].has_field_id && st->removed_fields[i].field_id == field_id) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static FieldDefault field_default_none(void) {
@@ -669,17 +749,31 @@ static void parse_enum(Parser *p, Schema *schema, bool is_bitset) {
     schema->enums[schema->enum_count++] = def;
 }
 
-static FieldDef parse_struct_field(Parser *p, Schema *schema, StructKind kind) {
+static void parse_struct_field(Parser *p, Schema *schema, StructDef *def, FieldDef *out_field, bool *out_is_removed) {
     bool is_deprecated = false;
+    bool is_removed_attr = false;
+    bool attr_has_id = false;
+    size_t attr_line = 0;
+    uint32_t attr_id = 0;
     while (parser_match(p, TOKEN_LBRACKET)) {
         Token attr = parser_next(p);
         if (attr.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected attribute identifier", p->lexer.filename, attr.line); }
         if (token_equals(&attr, "deprecated")) {
             is_deprecated = true;
+        } else if (token_equals(&attr, "removed")) {
+            is_removed_attr = true;
+            attr_line = attr.line;
+        } else if (token_equals(&attr, "reserved")) {
+            fatal("%s:%zu: error: 'reserved' attribute is no longer supported; use [removed] with an explicit id instead", p->lexer.filename, attr.line);
         } else {
             fatal("%s:%zu: error: unknown attribute '%.*s'", p->lexer.filename, attr.line, (int)(attr.end - attr.start), attr.start);
         }
         parser_expect(p, TOKEN_RBRACKET, "expected ']' after attribute");
+    }
+
+    if (is_removed_attr && def->kind != STRUCT_KIND_MESSAGE) {
+        size_t line = attr_line ? attr_line : p->lexer.line;
+        fatal("%s:%zu: error: removed fields are only valid inside messages", p->lexer.filename, line);
     }
 
     Token type_tok = parser_next(p);
@@ -695,21 +789,41 @@ static FieldDef parse_struct_field(Parser *p, Schema *schema, StructKind kind) {
     if (parser_match(p, TOKEN_QUESTION)) {
         is_optional = true;
     }
-    FieldDefault def = field_default_none();
+
+    uint32_t field_id = attr_id;
+    bool has_field_id = attr_has_id;
     if (parser_match(p, TOKEN_ASSIGN)) {
         Token value = parser_next(p);
-        if (value.kind == TOKEN_NUMBER) {
-            def = field_default_number((int64_t)token_to_uint64(&value));
-        } else if (value.kind == TOKEN_DOT) {
-            Token enum_tok = parser_next(p);
-            if (enum_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier after '.' for enum default", p->lexer.filename, enum_tok.line); }
-            def = field_default_enum(token_to_string(&enum_tok));
-        } else if (value.kind == TOKEN_IDENTIFIER) {
-            def = field_default_enum(token_to_string(&value));
-        } else {
-            fatal("%s:%zu: error: unsupported default expression", p->lexer.filename, value.line);
+        if (value.kind != TOKEN_NUMBER) {
+            fatal("%s:%zu: error: expected numeric field id after '=' (defaults are no longer supported)", p->lexer.filename, value.line);
         }
+        uint64_t raw_id = token_to_uint64(&value);
+        if (raw_id > UINT32_MAX) {
+            fatal("%s:%zu: error: field id exceeds 32-bit range", p->lexer.filename, value.line);
+        }
+        uint32_t parsed_id = (uint32_t)raw_id;
+        if (has_field_id && parsed_id != field_id) {
+            fatal("%s:%zu: error: conflicting field id for '%.*s' (reserved(%u) vs = %u)",
+                  p->lexer.filename, value.line, (int)(name_tok.end - name_tok.start), name_tok.start, field_id, parsed_id);
+        }
+        field_id = parsed_id;
+        has_field_id = true;
     }
+
+    if (def->kind == STRUCT_KIND_MESSAGE) {
+        if (!has_field_id) {
+            fatal("%s:%zu: error: message field '%.*s' must declare an explicit numeric id",
+                  p->lexer.filename, name_tok.line, (int)(name_tok.end - name_tok.start), name_tok.start);
+        }
+        if (field_id == 0) {
+            fatal("%s:%zu: error: field ids must start at 1 (got 0 for '%.*s')",
+                  p->lexer.filename, name_tok.line, (int)(name_tok.end - name_tok.start), name_tok.start);
+        }
+    } else if (has_field_id) {
+        fatal("%s:%zu: error: struct field '%.*s' cannot declare an id (defaults removed)",
+              p->lexer.filename, name_tok.line, (int)(name_tok.end - name_tok.start), name_tok.start);
+    }
+
     uint32_t bit_width = 0;
     if (parser_match(p, TOKEN_COLON)) {
         Token width_tok = parser_next(p);
@@ -722,16 +836,23 @@ static FieldDef parse_struct_field(Parser *p, Schema *schema, StructKind kind) {
     field.name = token_to_string(&name_tok);
     field.type_name = token_to_string(&type_tok);
     field.is_array = is_array;
-    field.def = def;
+    field.has_field_id = has_field_id;
+    field.field_id = field_id;
+    field.def = field_default_none();
     field.line = type_tok.line;
     field.bit_width = bit_width;
     field.is_optional = is_optional;
     field.is_deprecated = is_deprecated;
+    field.is_removed = is_removed_attr;
     if (field.is_array) {
         if (bit_width > 0) { fatal("%s:%zu: error: arrays cannot have bit width", p->lexer.filename, type_tok.line); }
         schema_add_array(schema, field.type_name, field.line);
     }
-    return field;
+    if (field.is_removed && (field.is_optional || field.is_array)) {
+        fatal("%s:%zu: error: removed fields cannot be optional or arrays", p->lexer.filename, type_tok.line);
+    }
+    *out_field = field;
+    *out_is_removed = field.is_removed;
 }
 
 static void parse_struct(Parser *p, Schema *schema, StructKind kind) {
@@ -742,8 +863,14 @@ static void parse_struct(Parser *p, Schema *schema, StructKind kind) {
     def.kind = kind;
     parser_expect(p, TOKEN_LBRACE, "expected '{' after struct/message name");
     while (!parser_match(p, TOKEN_RBRACE)) {
-        FieldDef field = parse_struct_field(p, schema, kind);
-        schema_add_field(schema, &def, field);
+        FieldDef field = {0};
+        bool is_removed = false;
+        parse_struct_field(p, schema, &def, &field, &is_removed);
+        if (is_removed) {
+            schema_add_removed_field(schema, &def, field);
+        } else {
+            schema_add_field(schema, &def, field);
+        }
     }
     def.line = name_tok.line;
     if (schema->struct_count == schema->struct_capacity) {
@@ -1227,7 +1354,6 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
                 make_prefixed(element_struct, sizeof(element_struct), schema, field->type_name);
                 sb_append(impl,
                     "%s        for (uint32_t k = 0; k < count; ++k) {\n"
-                    "%s            %s_defaults(&items[k]);\n"
                     "%s            if (!%s_decode_compact(&items[k], buffer, memory, schema)) {\n"
                     "%s                %sbuffer_pop_to(memory, memory_marker);\n"
                     "%s                return false;\n"
@@ -1333,7 +1459,6 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
                 make_prefixed(element_struct, sizeof(element_struct), schema, field->type_name);
                 sb_append(impl,
                     "%s        for (uint32_t i = 0; i < count; ++i) {\n"
-                    "%s            %s_defaults(&items[i]);\n"
                     "%s            if (!%s_decode_compact(&items[i], buffer, memory, NULL)) {\n"
                     "%s                %sbuffer_pop_to(memory, memory_marker);\n"
                     "%s                return false;\n"
@@ -1538,7 +1663,6 @@ static void append_message_codec(StringBuilder *decls, StringBuilder *impl, cons
             if (type_is_struct_type(schema, field->type_name)) {
                 char element_struct[256];
                 make_prefixed(element_struct, sizeof(element_struct), schema, field->type_name);
-                sb_append(impl, "                        %s_defaults(&items[i]);\n", element_struct);
                 sb_append(impl, "                        if (!%s_decode_compact(&items[i], buffer, memory, schema)) {\n", element_struct);
                 sb_append(impl, "                            %sbuffer_pop_to(memory, memory_marker);\n", schema->prefix);
                 sb_append(impl, "                            return false;\n");
@@ -2244,36 +2368,6 @@ static void append_io_forward_decls(StringBuilder *out, const Schema *schema, co
     }
 }
 
-static void append_defaults(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
-    for (size_t i = 0; i < schema->struct_count; ++i) {
-        const StructDef *def = &schema->structs[i];
-        char struct_name[256];
-        make_prefixed(struct_name, sizeof(struct_name), schema, def->name);
-        sb_append(decls, "%s void %s_defaults(%s *value);\n", api_macro, struct_name, struct_name);
-        sb_append(impl, "void %s_defaults(%s *value) {\n", struct_name, struct_name);
-        sb_append(impl, "    memset(value, 0, sizeof(*value));\n");
-        for (size_t j = 0; j < def->field_count; ++j) {
-            const FieldDef *field = &def->fields[j];
-            if (def->kind == STRUCT_KIND_MESSAGE) {
-                sb_append(impl, "    value->has_%s = false;\n", field->name);
-            } else if (field->is_optional) {
-                sb_append(impl, "    value->has_%s = false;\n", field->name);
-            }
-            if (field->def.kind == FIELD_DEFAULT_NUMBER) {
-                char buf[256];
-                const char *ctype = c_type_for(schema, field->type_name, buf, sizeof(buf), field->line);
-                sb_append(impl, "    value->%s = (%s)%lld;\n", field->name, ctype, (long long)field->def.number_value);
-            } else if (field->def.kind == FIELD_DEFAULT_ENUM_VALUE) {
-                char enum_value[256];
-                make_enum_value_name(enum_value, sizeof(enum_value), schema, field->type_name, field->def.enum_value);
-                sb_append(impl, "    value->%s = %s;\n", field->name, enum_value);
-            }
-        }
-        sb_append(impl, "}\n\n");
-    }
-    if (schema->struct_count) { sb_append(decls, "\n"); }
-}
-
 static void append_array_io(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
     for (size_t i = 0; i < schema->array_count; ++i) {
         const char *element = schema->arrays[i].element_type;
@@ -2302,7 +2396,6 @@ static void append_array_io(StringBuilder *decls, StringBuilder *impl, const Sch
             elem_type, elem_type, schema->prefix, elem_type, elem_type, elem_type);
         sb_append(impl, "    for (uint32_t i = 0; i < count; ++i) {\n");
         if (elem_struct) {
-            sb_append(impl, "        %s_defaults(&items[i]);\n", elem_struct_name);
             sb_append(impl,
                 "        if (!%s_read(&items[i], buffer, memory, schema)) {\n"
                 "            %sbuffer_pop_to(memory, memory_marker);\n"
@@ -2366,6 +2459,7 @@ static void append_struct_io(StringBuilder *decls, StringBuilder *impl, const Sc
         make_prefixed(struct_name, sizeof(struct_name), schema, def->name);
         sb_append(impl, "bool %s_read(%s *value, %sBuffer *buffer, %sBuffer *memory, const %sSchemaInfo *schema) {\n", struct_name, struct_name, schema->prefix, schema->prefix, schema->prefix);
         sb_append(impl, "    if (!memory) { return false; }\n");
+        sb_append(impl, "    memset(value, 0, sizeof(*value));\n");
 
         uint32_t optional_count = 0;
         for (size_t j = 0; j < def->field_count; ++j) {
@@ -2580,8 +2674,7 @@ static void append_metadata(StringBuilder *decls, StringBuilder *impl, const Sch
         snprintf(enum_name, sizeof(enum_name), "%s%sParameters", schema->prefix, tmp);
         sb_append(decls, "typedef enum %s {\n", enum_name);
         for (size_t j = 0; j < def->field_count; ++j) {
-            size_t val = (def->kind == STRUCT_KIND_MESSAGE) ? (j + 1) : j;
-            sb_append(decls, "    %s_%s = %zu,\n", enum_name, def->fields[j].name, val);
+            sb_append(decls, "    %s_%s = %u,\n", enum_name, def->fields[j].name, def->fields[j].field_id);
         }
         sb_append(decls, "} %s;\n\n", enum_name);
 
@@ -2709,7 +2802,6 @@ static void generate_header(const Schema *schema, const char *input_path, const 
     append_array_defs(&out, schema);
     append_struct_defs(&out, schema);
     append_io_forward_decls(&out, schema, api_macro);
-    append_defaults(&out, &impl, schema, api_macro);
     append_array_io(&out, &impl, schema, api_macro);
     append_struct_io(&out, &impl, schema, api_macro);
     append_metadata(&out, &impl, schema, api_macro);
@@ -2735,7 +2827,7 @@ static void generate_header(const Schema *schema, const char *input_path, const 
 // --- Binary Schema Generation ---
 
 #define BINARY_MAGIC "BKIW"
-#define BINARY_VERSION 2
+#define BINARY_VERSION 3
 
 static void sb_write_u8(StringBuilder *sb, uint8_t v) {
     sb_append_bytes(sb, (char *)&v, 1);
@@ -2808,24 +2900,29 @@ static void generate_binary_schema_data(const Schema *schema, StringBuilder *sb)
         sb_write_strz(sb, def->name);
         sb_write_u8(sb, def->kind == STRUCT_KIND_MESSAGE ? 2 : 1); // 1=STRUCT, 2=MESSAGE
         sb_write_varuint(sb, get_type_id(schema, def->name));
-        sb_write_varuint(sb, def->field_count);
+        sb_write_varuint(sb, def->field_count + def->removed_count);
 
         for (size_t j = 0; j < def->field_count; ++j) {
             const FieldDef *field = &def->fields[j];
             sb_write_strz(sb, field->name);
-            
-            uint32_t field_id = (uint32_t)j;
-            if (def->kind == STRUCT_KIND_MESSAGE) {
-                field_id = (uint32_t)(j + 1);
-            }
-            sb_write_varuint(sb, field_id);
-
+            sb_write_varuint(sb, field->field_id);
             sb_write_varuint(sb, get_type_id(schema, field->type_name));
             
             uint8_t flags = 0;
             if (field->is_array) { flags |= 1; }
             if (field->is_optional) { flags |= 2; }
             if (field->is_deprecated) { flags |= 4; }
+            if (field->is_removed) { flags |= 8; }
+            sb_write_u8(sb, flags);
+            sb_write_varuint(sb, field->bit_width);
+        }
+        for (size_t j = 0; j < def->removed_count; ++j) {
+            const FieldDef *field = &def->removed_fields[j];
+            sb_write_strz(sb, field->name ? field->name : "");
+            sb_write_varuint(sb, field->field_id);
+            sb_write_varuint(sb, get_type_id(schema, field->type_name));
+            
+            uint8_t flags = 8; // removed/reserved marker
             sb_write_u8(sb, flags);
             sb_write_varuint(sb, field->bit_width);
         }
@@ -2874,7 +2971,7 @@ static void compat_parse_binary_schema(const char *path, size_t builtin_alias_co
     }
     cursor += 4;
     uint8_t version = *cursor++;
-    if (version != BINARY_VERSION) {
+    if (version != BINARY_VERSION && version != 2) {
         free(data);
         fatal("schema_gen: existing binary schema '%s' has incompatible version (%u)", path, (unsigned)version);
     }
@@ -2907,6 +3004,7 @@ static void compat_parse_binary_schema(const char *path, size_t builtin_alias_co
                 f->is_array = (flags & 1) != 0;
                 f->is_optional = (flags & 2) != 0;
                 f->is_deprecated = (flags & 4) != 0;
+                f->is_removed = (flags & 8) != 0;
                 f->bit_width = (uint32_t)compat_read_varuint(&cursor, end);
             }
         }
@@ -2930,43 +3028,89 @@ static void check_backward_compatibility(const char *existing_path, const Schema
         const StructDef *st = find_struct_const(schema, ot->name);
         if (!st) { fatal("%s: incompatible change: removed type '%s'", schema->filename, ot->name); }
         if (st->kind != expected_kind) { fatal("%s:%zu: incompatible change: kind of '%s' changed", schema->filename, st->line, ot->name); }
-
-        for (size_t j = 0; j < st->field_count; ++j) {
-            const FieldDef *nf = &st->fields[j];
-            const CompatField *of = &ot->fields[j];
-            if (strcmp(nf->name, of->name) != 0) {
-                fatal("%s:%zu: incompatible change: field %zu in '%s' missing expected '%s' (found '%s'; removing/reordering fields breaks binary compatibility)",
-                      schema->filename, nf->line, j, ot->name, of->name, nf->name);
+        if (st->kind == STRUCT_KIND_MESSAGE) {
+            for (size_t j = 0; j < ot->field_count; ++j) {
+                const CompatField *of = &ot->fields[j];
+                if (of->is_removed) {
+                    if (struct_find_field_by_id(st, of->id)) {
+                        fatal("%s:%zu: incompatible change: field id %u in message '%s' was previously removed", schema->filename, st->line, of->id, st->name);
+                    }
+                    if (!struct_has_removed_id(st, of->id)) {
+                        fatal("%s:%zu: incompatible change: removed field id %u from message '%s' is no longer marked removed", schema->filename, st->line, of->id, st->name);
+                    }
+                    continue;
+                }
+                const FieldDef *nf = struct_find_field_by_id(st, of->id);
+                if (!nf) {
+                    const FieldDef *by_name = struct_find_field_by_name(st, of->name);
+                    if (by_name) {
+                        fatal("%s:%zu: incompatible change: field '%s' changed id (%u -> %u)",
+                              schema->filename, by_name->line, of->name, of->id, by_name->field_id);
+                    }
+                    if (struct_has_removed_id(st, of->id)) {
+                        continue; // intentionally removed
+                    }
+                    fatal("%s:%zu: incompatible change: field '%s' (id %u) removed from message '%s' without reserving the id",
+                          schema->filename, st->line, of->name, of->id, st->name);
+                }
+                if (strcmp(nf->name, of->name) != 0) {
+                    fatal("%s:%zu: incompatible change: field id %u in message '%s' renamed from '%s' to '%s'",
+                          schema->filename, nf->line, of->id, st->name, of->name, nf->name);
+                }
+                if (nf->is_array != of->is_array || nf->is_optional != of->is_optional || nf->is_deprecated != of->is_deprecated) {
+                    fatal("%s:%zu: incompatible change: field '%s' modifiers changed", schema->filename, nf->line, nf->name);
+                }
+                if (nf->bit_width != of->bit_width) {
+                    fatal("%s:%zu: incompatible change: field '%s' bit width changed (%u -> %u)", schema->filename, nf->line, nf->name, of->bit_width, nf->bit_width);
+                }
+                const char *old_type_name = compat_find_type_name_by_id(&old_schema, schema->builtin_alias_count, of->type_id);
+                if (!old_type_name) {
+                    fatal("%s:%zu: incompatible change: field '%s' refers to unknown type id %u in existing schema", schema->filename, nf->line, nf->name, of->type_id);
+                }
+                uint32_t new_old_type_id = get_type_id(schema, old_type_name);
+                uint32_t new_field_type_id = get_type_id(schema, nf->type_name);
+                if (new_old_type_id != new_field_type_id) {
+                    fatal("%s:%zu: incompatible change: field '%s' type changed (was '%s')", schema->filename, nf->line, nf->name, old_type_name);
+                }
             }
-            uint32_t expected_id = (st->kind == STRUCT_KIND_MESSAGE) ? (uint32_t)(j + 1) : (uint32_t)j;
-            if (of->id != expected_id) {
-                fatal("%s:%zu: incompatible change: field '%s' id changed (%u -> %u)", schema->filename, nf->line, nf->name, of->id, expected_id);
+        } else {
+            if (st->field_count != ot->field_count) {
+                if (st->field_count < ot->field_count) {
+                    const CompatField *of = &ot->fields[st->field_count];
+                    fatal("%s:%zu: incompatible change: removed field '%s' from struct '%s' (struct layouts are fixed)",
+                          schema->filename, st->line, of->name, ot->name);
+                } else {
+                    const FieldDef *nf = &st->fields[ot->field_count];
+                    fatal("%s:%zu: incompatible change: added field '%s' to struct '%s' (struct layouts are fixed)",
+                          schema->filename, nf->line, nf->name, ot->name);
+                }
             }
-            if (nf->is_array != of->is_array || nf->is_optional != of->is_optional || nf->is_deprecated != of->is_deprecated) {
-                fatal("%s:%zu: incompatible change: field '%s' modifiers changed", schema->filename, nf->line, nf->name);
+            for (size_t j = 0; j < st->field_count; ++j) {
+                const FieldDef *nf = &st->fields[j];
+                const CompatField *of = &ot->fields[j];
+                if (strcmp(nf->name, of->name) != 0) {
+                    fatal("%s:%zu: incompatible change: field %zu in '%s' missing expected '%s' (found '%s'; removing/reordering fields breaks binary compatibility)",
+                          schema->filename, nf->line, j, ot->name, of->name, nf->name);
+                }
+                if (!nf->has_field_id || nf->field_id != of->id) {
+                    fatal("%s:%zu: incompatible change: field '%s' id changed (%u -> %u)", schema->filename, nf->line, nf->name, of->id, nf->has_field_id ? nf->field_id : UINT32_MAX);
+                }
+                if (nf->is_array != of->is_array || nf->is_optional != of->is_optional || nf->is_deprecated != of->is_deprecated) {
+                    fatal("%s:%zu: incompatible change: field '%s' modifiers changed", schema->filename, nf->line, nf->name);
+                }
+                if (nf->bit_width != of->bit_width) {
+                    fatal("%s:%zu: incompatible change: field '%s' bit width changed (%u -> %u)", schema->filename, nf->line, nf->name, of->bit_width, nf->bit_width);
+                }
+                const char *old_type_name = compat_find_type_name_by_id(&old_schema, schema->builtin_alias_count, of->type_id);
+                if (!old_type_name) {
+                    fatal("%s:%zu: incompatible change: field '%s' refers to unknown type id %u in existing schema", schema->filename, nf->line, nf->name, of->type_id);
+                }
+                uint32_t new_old_type_id = get_type_id(schema, old_type_name);
+                uint32_t new_field_type_id = get_type_id(schema, nf->type_name);
+                if (new_old_type_id != new_field_type_id) {
+                    fatal("%s:%zu: incompatible change: field '%s' type changed (was '%s')", schema->filename, nf->line, nf->name, old_type_name);
+                }
             }
-            if (nf->bit_width != of->bit_width) {
-                fatal("%s:%zu: incompatible change: field '%s' bit width changed (%u -> %u)", schema->filename, nf->line, nf->name, of->bit_width, nf->bit_width);
-            }
-            const char *old_type_name = compat_find_type_name_by_id(&old_schema, schema->builtin_alias_count, of->type_id);
-            if (!old_type_name) {
-                fatal("%s:%zu: incompatible change: field '%s' refers to unknown type id %u in existing schema", schema->filename, nf->line, nf->name, of->type_id);
-            }
-            uint32_t new_old_type_id = get_type_id(schema, old_type_name);
-            uint32_t new_field_type_id = get_type_id(schema, nf->type_name);
-            if (new_old_type_id != new_field_type_id) {
-                fatal("%s:%zu: incompatible change: field '%s' type changed (was '%s')", schema->filename, nf->line, nf->name, old_type_name);
-            }
-        }
-        if (st->field_count < ot->field_count) {
-            const CompatField *of = &ot->fields[st->field_count];
-            fatal("%s:%zu: incompatible change: removed field '%s' from '%s' (structs/messages are immutable; removing fields shifts ids and breaks older decoders)",
-                  schema->filename, st->line, of->name, ot->name);
-        }
-        if (st->field_count > ot->field_count) {
-            const FieldDef *nf = &st->fields[ot->field_count];
-            fatal("%s:%zu: incompatible change: added field '%s' to type '%s' (structs/messages are immutable; adding fields changes field ids and breaks older decoders)",
-                  schema->filename, nf->line, nf->name, ot->name);
         }
     }
 }
@@ -2994,6 +3138,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    bool is_array;\n"
         "    bool is_optional;\n"
         "    bool is_deprecated;\n"
+        "    bool is_removed;\n"
         "    int32_t mapping;\n"
         "} %sSchemaField;\n\n",
         schema->prefix, schema->prefix);
@@ -3058,7 +3203,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    if (size < 5 || memcmp(cursor, %sBINARY_MAGIC, 4) != 0) return NULL;\n"
         "    cursor += 4;\n"
         "    uint8_t version = *cursor++;\n"
-        "    if (version != %sBINARY_VERSION) return NULL;\n"
+        "    if (version != %sBINARY_VERSION && version != 2) return NULL;\n"
         "    \n"
         "    uint64_t count = %sread_varuint(&cursor, end);\n"
         "    %sSchemaInfo *info = (%sSchemaInfo *)%sbuffer_push_aligned(allocator, sizeof(%sSchemaInfo), sizeof(void*));\n"
@@ -3087,6 +3232,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "                type->fields[j].is_array = (flags & 1) != 0;\n"
         "                type->fields[j].is_optional = (flags & 2) != 0;\n"
         "                type->fields[j].is_deprecated = (flags & 4) != 0;\n"
+        "                type->fields[j].is_removed = (flags & 8) != 0;\n"
         "                type->fields[j].mapping = -1;\n"
         "            }\n"
         "        } else {\n"
@@ -3108,6 +3254,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "        \n"
         "        for (uint32_t j = 0; j < type->field_count; ++j) {\n"
         "            %sSchemaField *field = &type->fields[j];\n"
+        "            if (field->is_removed) continue;\n"
         "            for (uint32_t k = 0; k < desc->parameter_count; ++k) {\n"
         "                if (strcmp(desc->parameters[k].name, field->name) == 0) {\n"
         "                    field->mapping = (int32_t)desc->parameters[k].parameter_id;\n"
@@ -3230,6 +3377,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    uint32_t optional_count = 0;\n"
         "    bool has_bitfields = false;\n"
         "    for (uint32_t i = 0; i < type->field_count; ++i) {\n"
+        "        if (type->fields[i].is_removed) continue;\n"
         "        if (type->fields[i].is_optional) optional_count++;\n"
         "        if (type->fields[i].bit_width > 0) has_bitfields = true;\n"
         "    }\n"
@@ -3255,6 +3403,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    \n"
         "    uint32_t opt_idx = 0;\n"
         "    for (uint32_t i = 0; i < type->field_count; ++i) {\n"
+        "        if (type->fields[i].is_removed) continue;\n"
         "        bool present = true;\n"
         "        if (type->fields[i].is_optional) {\n"
         "            present = (bitmask[opt_idx / 8] >> (opt_idx % 8)) & 1;\n"

@@ -6,7 +6,7 @@
 - Generates header-only C APIs and matching binary schema blobs from a single schema file.
 - Produces both struct/message definitions and encode/decode/skip helpers for **Standard** (wire-tag) and **Compact** (tagless) encodings.
 - Works entirely on `stdint.h`-style primitives plus enums/structs, no external dependencies beyond the C standard library.
-- Handles optional fields, arrays, user-defined types/aliases, defaults, endianness, and schema reflection data for runtime validation.
+- Handles optional fields, arrays, user-defined types/aliases, endianness, and schema reflection data for runtime validation.
 
 ## Building
 ```bash
@@ -28,8 +28,8 @@ By default the generator will **refuse to overwrite** an existing `output.hibins
 ### Compatibility guard (why changes are blocked)
 Binary schemas are meant to be stable contracts: downstream code that reads an older stream must be able to decode packets emitted by newer writers. Because of that the generator enforces:
 - Existing enums/structs/messages cannot be removed or have their kind changed.
-- Fields in structs/messages cannot be renamed, retyped, reordered, or have modifiers (array/optional/deprecated) changed.
-- Structs/messages cannot be extended with new fields (growth changes field ids and breaks existing decoders).
+- Fields in structs cannot be renamed, retyped, reordered, or have modifiers (array/optional/deprecated) changed, and structs cannot grow.
+- Message fields cannot be renamed/retyped/reordered; ids are stable and blocked once used (or marked `[removed]`). Messages may add new fields with fresh ids.
 
 If you truly need a breaking change, bump to a new type/message name or supply `--ignore-compat` for that run and accept the ABI break.
 
@@ -51,14 +51,19 @@ Within structs/messages:
 - Arrays: `u8[] payload;`
 - Optional fields: `u32 checksum?;` (encoded via leading bitmask).
 - Bit-width hints: `u16 flags : 4;` (declares a C bitfield; in compact encoding these bit-width scalars are packed LSB-first and padded to the next byte before the next non-bit-width field; Standard encoding still masks then writes the full scalar varint).
-- Defaults: `u8 version = 1;` or enum defaults `Mode mode = ACTIVE;`.
+- Message field ids: `u32 sequence = 1;` assigns a stable numeric id. Removed ids stay blocked via `[removed]`.
+
+Message field numbering (Standard encoding):
+- Every message field must declare an explicit numeric id (`= N`).
+- Ids are immutable once published; changing or reusing an id is an error.
+- Retired ids stay blocked forever via `[removed]`; unknown/removed ids are skipped safely while decoding.
 
 Messages automatically synthesize an `id` field when `id = <number>;` appears inside the definition.
 
 Bit-width annotations now affect both the generated C struct layout and compact wire format: consecutive bit-width scalars are appended bit-by-bit (LSB-first), then padded to the next byte boundary before any following non-bit-width field or at struct end. Optional fields still use the leading presence bitmask, and arrays cannot specify bit widths.
 
 ## Example Schema (feature tour)
-Below is a compact `.cm` file that exercises the language surface—prefixing, aliases, enums with explicit bases, structs vs. messages, optionals, arrays, bitfields, and defaults:
+Below is a compact `.cm` file that exercises the language surface—prefixing, aliases, enums with explicit bases, structs vs. messages, optionals, arrays, and bitfields:
 
 ```cm
 // example.cm
@@ -81,7 +86,7 @@ struct Attachment {
 
 struct Parcel {
   handle id;
-  Status state = .ok; // enum default (dotted or bare name is fine)
+  Status state;
   coord x;
   coord y;
   coord z? : 20;      // optional C bitfield; compact encoding packs 20 bits and pads before the next field
@@ -98,9 +103,9 @@ bitset Access : u8 {
 }
 
 message Envelope {
-  u32 sequence = 1;   // defaults apply to messages too (Standard encoding)
-  Parcel body;        // structs nested inside messages use Compact encoding
-  u8 signature[];
+  u32 sequence = 1;   // explicit field ids for messages (stable once published)
+  Parcel body = 2;    // structs nested inside messages use Compact encoding
+  u8 signature[] = 3;
 }
 ```
 
@@ -111,7 +116,7 @@ The header stitches several pieces together (guarded by feature macros derived f
 
 1. **Buffer utilities**: `Buffer` plus aligned push/pop helpers to treat caller-provided memory as arenas.
 2. **Wire helpers**: Varint encoders, ZigZag helpers, compact floating-point encoding, and Protobuf-like wire tag readers/writers.
-3. **Type declarations**: Forward declarations followed by enums, arrays, structs, and their default initializers (`Foo_defaults`).
+3. **Type declarations**: Forward declarations followed by enums, arrays, and structs/messages.
 4. **I/O helpers**: `read`/`write` routines for every array/struct plus `*_encode_compact`, `*_decode_compact`, and `*_skip_compact`.
 5. **Metadata**: Generated `TypeDescription` and `ParameterInfo` tables (exposed via `get_type_description`) that make offsets and field IDs available at runtime.
 6. **Runtime schema**: Embedded binary schema blob, parsing helpers (`parse_schema`, `get_embedded_schema`), and `skip_generic` for schema-driven skipping when introspecting encoded streams.

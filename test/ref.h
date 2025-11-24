@@ -124,6 +124,10 @@ struct gen_Player {
     gen_Class class;
     bool has_colors;
     gen_ArrayAchievements colors;
+    bool has_extraSeq2;
+    u32 extraSeq2 GEN_DEPRECATED("deprecated");
+    bool has_extraSeq3;
+    u32 extraSeq3;
 };
 
 GEN__API bool gen_ArrayAchievements_read(gen_ArrayAchievements *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema);
@@ -134,10 +138,6 @@ GEN__API bool gen_PlayerState_read(gen_PlayerState *value, gen_Buffer *buffer, g
 GEN__API bool gen_PlayerState_write(const gen_PlayerState *value, gen_Buffer *buffer, const gen_SchemaInfo *schema);
 GEN__API bool gen_Player_read(gen_Player *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema);
 GEN__API bool gen_Player_write(const gen_Player *value, gen_Buffer *buffer, const gen_SchemaInfo *schema);
-
-GEN__API void gen_Achievements_defaults(gen_Achievements *value);
-GEN__API void gen_PlayerState_defaults(gen_PlayerState *value);
-GEN__API void gen_Player_defaults(gen_Player *value);
 
 typedef enum gen_type {
     gen_type_u8,
@@ -194,6 +194,8 @@ typedef enum gen_playerParameters {
     gen_playerParameters_flags = 2,
     gen_playerParameters_class = 3,
     gen_playerParameters_colors = 4,
+    gen_playerParameters_extraSeq2 = 6,
+    gen_playerParameters_extraSeq3 = 7,
 } gen_playerParameters;
 
 GEN__API const gen_TypeDescription *gen_get_type_description(gen_type type_id);
@@ -217,6 +219,7 @@ typedef struct gen_SchemaField {
     bool is_array;
     bool is_optional;
     bool is_deprecated;
+    bool is_removed;
     int32_t mapping;
 } gen_SchemaField;
 
@@ -711,27 +714,6 @@ bool gen_read_compact_f64(gen_Buffer *buffer, double *out) {
     return gen_buffer_read_bytes(buffer, out, sizeof(*out));
 #endif
 }
-void gen_Achievements_defaults(gen_Achievements *value) {
-    memset(value, 0, sizeof(*value));
-}
-
-void gen_PlayerState_defaults(gen_PlayerState *value) {
-    memset(value, 0, sizeof(*value));
-    value->has_yaw = false;
-    value->has_posX = false;
-    value->has_posY = false;
-    value->has_posZ = false;
-}
-
-void gen_Player_defaults(gen_Player *value) {
-    memset(value, 0, sizeof(*value));
-    value->has_id = false;
-    value->has_flags = false;
-    value->has_class = false;
-    value->class = gen_Class_mage;
-    value->has_colors = false;
-}
-
 bool gen_ArrayAchievements_read(gen_ArrayAchievements *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema) {
     if (!memory) { return false; }
     uint32_t count = 0;
@@ -743,7 +725,6 @@ bool gen_ArrayAchievements_read(gen_ArrayAchievements *value, gen_Buffer *buffer
     gen_Achievements *items = (gen_Achievements *)gen_buffer_push_aligned(memory, (size_t)count * sizeof(gen_Achievements), (sizeof(gen_Achievements) > sizeof(void *)) ? sizeof(gen_Achievements) : sizeof(void *));
     if (!items) { return false; }
     for (uint32_t i = 0; i < count; ++i) {
-        gen_Achievements_defaults(&items[i]);
         if (!gen_Achievements_read(&items[i], buffer, memory, schema)) {
             gen_buffer_pop_to(memory, memory_marker);
             return false;
@@ -765,6 +746,7 @@ bool gen_ArrayAchievements_write(const gen_ArrayAchievements *value, gen_Buffer 
 
 bool gen_Achievements_read(gen_Achievements *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema) {
     if (!memory) { return false; }
+    memset(value, 0, sizeof(*value));
     if (!gen_buffer_read_u8(buffer, &value->red)) { return false; }
     if (!gen_buffer_read_u8(buffer, &value->green)) { return false; }
     if (!gen_buffer_read_u8(buffer, &value->blue)) { return false; }
@@ -783,6 +765,7 @@ bool gen_Achievements_write(const gen_Achievements *value, gen_Buffer *buffer, c
 
 bool gen_PlayerState_read(gen_PlayerState *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema) {
     if (!memory) { return false; }
+    memset(value, 0, sizeof(*value));
     uint8_t bitmask[1];
     if (!gen_buffer_read_bytes(buffer, bitmask, sizeof(bitmask))) { return false; }
     value->has_yaw = (bitmask[0] >> 0) & 1u;
@@ -890,6 +873,7 @@ bool gen_PlayerState_write(const gen_PlayerState *value, gen_Buffer *buffer, con
 
 bool gen_Player_read(gen_Player *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema) {
     if (!memory) { return false; }
+    memset(value, 0, sizeof(*value));
     if (!gen_buffer_read_u32(buffer, &value->id)) { return false; }
     {
         uint8_t raw = 0;
@@ -902,6 +886,8 @@ bool gen_Player_read(gen_Player *value, gen_Buffer *buffer, gen_Buffer *memory, 
         value->class = (gen_Class)raw;
     }
     if (!gen_ArrayAchievements_read(&value->colors, buffer, memory, schema)) { return false; }
+    if (!gen_buffer_read_u32(buffer, &value->extraSeq2)) { return false; }
+    if (!gen_buffer_read_u32(buffer, &value->extraSeq3)) { return false; }
     return true;
 }
 
@@ -911,6 +897,8 @@ bool gen_Player_write(const gen_Player *value, gen_Buffer *buffer, const gen_Sch
     if (!gen_buffer_write_u8(buffer, (uint8_t)value->flags)) { return false; }
     if (!gen_buffer_write_u32(buffer, (u32)value->class)) { return false; }
     if (!gen_ArrayAchievements_write(&value->colors, buffer, schema)) { return false; }
+    if (!gen_buffer_write_u32(buffer, value->extraSeq2)) { return false; }
+    if (!gen_buffer_write_u32(buffer, value->extraSeq3)) { return false; }
     return true;
 }
 
@@ -933,12 +921,14 @@ static const gen_ParameterInfo gen_Player_parameters[] = {
     { "flags", gen_playerParameters_flags, gen_type_PlayerFlags, offsetof(gen_Player, flags) },
     { "class", gen_playerParameters_class, gen_type_Class, offsetof(gen_Player, class) },
     { "colors", gen_playerParameters_colors, gen_type_ArrayAchievements, offsetof(gen_Player, colors) },
+    { "extraSeq2", gen_playerParameters_extraSeq2, gen_type_u32, offsetof(gen_Player, extraSeq2) },
+    { "extraSeq3", gen_playerParameters_extraSeq3, gen_type_u32, offsetof(gen_Player, extraSeq3) },
 };
 
 static const gen_TypeDescription gen_type_descriptions[] = {
     { "Achievements", gen_type_Achievements, sizeof(gen_Achievements), sizeof(gen_Achievements), gen_Achievements_parameters, 4 },
     { "PlayerState", gen_type_PlayerState, sizeof(gen_PlayerState), sizeof(gen_PlayerState), gen_PlayerState_parameters, 4 },
-    { "Player", gen_type_Player, sizeof(gen_Player), sizeof(gen_Player), gen_Player_parameters, 4 },
+    { "Player", gen_type_Player, sizeof(gen_Player), sizeof(gen_Player), gen_Player_parameters, 6 },
 };
 
 const gen_TypeDescription *gen_get_type_description(gen_type type_id) {
@@ -1266,6 +1256,14 @@ bool gen_Player_encode_compact(const gen_Player *value, gen_Buffer *buffer, cons
         }
         if (!gen_buffer_end_block(buffer, block_marker)) { return false; }
     }
+    if (true) {
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_extraSeq2, gen_WireType_Varint)) { return false; }
+        if (!gen_write_var_u32(buffer, (uint32_t)value->extraSeq2)) { return false; }
+    }
+    if (true) {
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_extraSeq3, gen_WireType_Varint)) { return false; }
+        if (!gen_write_var_u32(buffer, (uint32_t)value->extraSeq3)) { return false; }
+    }
     if (!gen_write_var_u32(buffer, 0)) { return false; }
     return true;
 }
@@ -1312,7 +1310,6 @@ bool gen_Player_decode_compact(gen_Player *value, gen_Buffer *buffer, gen_Buffer
                     gen_Achievements *items = (gen_Achievements *)gen_buffer_push_aligned(memory, (size_t)count * sizeof(gen_Achievements), (sizeof(gen_Achievements) > sizeof(void *)) ? sizeof(gen_Achievements) : sizeof(void *));
                     if (!items) { return false; }
                     for (uint32_t i = 0; i < count; ++i) {
-                        gen_Achievements_defaults(&items[i]);
                         if (!gen_Achievements_decode_compact(&items[i], buffer, memory, schema)) {
                             gen_buffer_pop_to(memory, memory_marker);
                             return false;
@@ -1322,6 +1319,22 @@ bool gen_Player_decode_compact(gen_Player *value, gen_Buffer *buffer, gen_Buffer
                     value->colors.count = count;
                 }
                 if (!gen_buffer_end_read_block(buffer, block_end)) { return false; }
+                break;
+            }
+            case gen_playerParameters_extraSeq2: {
+                {
+                    uint32_t tmp = 0;
+                    if (!gen_read_var_u32(buffer, &tmp)) { return false; }
+                    value->extraSeq2 = (uint32_t)tmp;
+                }
+                break;
+            }
+            case gen_playerParameters_extraSeq3: {
+                {
+                    uint32_t tmp = 0;
+                    if (!gen_read_var_u32(buffer, &tmp)) { return false; }
+                    value->extraSeq3 = (uint32_t)tmp;
+                }
                 break;
             }
             default:
@@ -1344,11 +1357,11 @@ bool gen_Player_skip_compact(gen_Buffer *buffer) {
 }
 
 #define gen_BINARY_MAGIC "BKIW"
-#define gen_BINARY_VERSION 2
+#define gen_BINARY_VERSION 3
 
 const uint8_t gen_schema_blob[] = {
 
-    0x42, 0x4b, 0x49, 0x57, 0x02, 0x05, 0x43, 0x6c, 0x61, 0x73, 0x73, 0x00, 0x00, 0x0b, 0x00, 0x50, 
+    0x42, 0x4b, 0x49, 0x57, 0x03, 0x05, 0x43, 0x6c, 0x61, 0x73, 0x73, 0x00, 0x00, 0x0b, 0x00, 0x50, 
     0x6c, 0x61, 0x79, 0x65, 0x72, 0x46, 0x6c, 0x61, 0x67, 0x73, 0x00, 0x00, 0x0c, 0x00, 0x41, 0x63, 
     0x68, 0x69, 0x65, 0x76, 0x65, 0x6d, 0x65, 0x6e, 0x74, 0x73, 0x00, 0x01, 0x0d, 0x04, 0x72, 0x65, 
     0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x67, 0x72, 0x65, 0x65, 0x6e, 0x00, 0x01, 0x00, 0x00, 0x00, 
@@ -1356,10 +1369,12 @@ const uint8_t gen_schema_blob[] = {
     0x00, 0x00, 0x00, 0x50, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x53, 0x74, 0x61, 0x74, 0x65, 0x00, 0x01, 
     0x0e, 0x04, 0x79, 0x61, 0x77, 0x00, 0x00, 0x02, 0x02, 0x0a, 0x70, 0x6f, 0x73, 0x58, 0x00, 0x01, 
     0x06, 0x02, 0x14, 0x70, 0x6f, 0x73, 0x59, 0x00, 0x02, 0x06, 0x02, 0x14, 0x70, 0x6f, 0x73, 0x5a, 
-    0x00, 0x03, 0x06, 0x02, 0x14, 0x50, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x00, 0x02, 0x0f, 0x04, 0x69, 
+    0x00, 0x03, 0x06, 0x02, 0x14, 0x50, 0x6c, 0x61, 0x79, 0x65, 0x72, 0x00, 0x02, 0x0f, 0x07, 0x69, 
     0x64, 0x00, 0x01, 0x02, 0x00, 0x00, 0x66, 0x6c, 0x61, 0x67, 0x73, 0x00, 0x02, 0x0c, 0x00, 0x00, 
     0x63, 0x6c, 0x61, 0x73, 0x73, 0x00, 0x03, 0x0b, 0x00, 0x00, 0x63, 0x6f, 0x6c, 0x6f, 0x72, 0x73, 
-    0x00, 0x04, 0x0d, 0x01, 0x00, 
+    0x00, 0x04, 0x0d, 0x01, 0x00, 0x65, 0x78, 0x74, 0x72, 0x61, 0x53, 0x65, 0x71, 0x32, 0x00, 0x06, 
+    0x02, 0x04, 0x00, 0x65, 0x78, 0x74, 0x72, 0x61, 0x53, 0x65, 0x71, 0x33, 0x00, 0x07, 0x02, 0x00, 
+    0x00, 0x65, 0x78, 0x74, 0x72, 0x61, 0x53, 0x65, 0x71, 0x00, 0x05, 0x02, 0x08, 0x00, 
 };
 
 static const char *gen_read_strz(const uint8_t **cursor, const uint8_t *end) {
@@ -1388,7 +1403,7 @@ const gen_SchemaInfo *gen_parse_schema(const uint8_t *data, size_t size, gen_Buf
     if (size < 5 || memcmp(cursor, gen_BINARY_MAGIC, 4) != 0) return NULL;
     cursor += 4;
     uint8_t version = *cursor++;
-    if (version != gen_BINARY_VERSION) return NULL;
+    if (version != gen_BINARY_VERSION && version != 2) return NULL;
     
     uint64_t count = gen_read_varuint(&cursor, end);
     gen_SchemaInfo *info = (gen_SchemaInfo *)gen_buffer_push_aligned(allocator, sizeof(gen_SchemaInfo), sizeof(void*));
@@ -1417,6 +1432,7 @@ const gen_SchemaInfo *gen_parse_schema(const uint8_t *data, size_t size, gen_Buf
                 type->fields[j].is_array = (flags & 1) != 0;
                 type->fields[j].is_optional = (flags & 2) != 0;
                 type->fields[j].is_deprecated = (flags & 4) != 0;
+                type->fields[j].is_removed = (flags & 8) != 0;
                 type->fields[j].mapping = -1;
             }
         } else {
@@ -1438,6 +1454,7 @@ const gen_SchemaInfo *gen_parse_schema(const uint8_t *data, size_t size, gen_Buf
         
         for (uint32_t j = 0; j < type->field_count; ++j) {
             gen_SchemaField *field = &type->fields[j];
+            if (field->is_removed) continue;
             for (uint32_t k = 0; k < desc->parameter_count; ++k) {
                 if (strcmp(desc->parameters[k].name, field->name) == 0) {
                     field->mapping = (int32_t)desc->parameters[k].parameter_id;
@@ -1538,6 +1555,7 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
     uint32_t optional_count = 0;
     bool has_bitfields = false;
     for (uint32_t i = 0; i < type->field_count; ++i) {
+        if (type->fields[i].is_removed) continue;
         if (type->fields[i].is_optional) optional_count++;
         if (type->fields[i].bit_width > 0) has_bitfields = true;
     }
@@ -1563,6 +1581,7 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
     
     uint32_t opt_idx = 0;
     for (uint32_t i = 0; i < type->field_count; ++i) {
+        if (type->fields[i].is_removed) continue;
         bool present = true;
         if (type->fields[i].is_optional) {
             present = (bitmask[opt_idx / 8] >> (opt_idx        )) & 1;

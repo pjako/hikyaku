@@ -42,8 +42,11 @@ bitset PlayerFlags : u8 {
 // typedef uint8_t playerFlagsBitField;
 
 message Player {
-  u32 id;
-  PlayerFlags flags;
-  Class class = .mage;
-  Achievements[] colors;
+  u32 id = 1;
+  PlayerFlags flags = 2;
+  Class class = 3;
+  Achievements[] colors = 4;
+  [removed] u32 extraSeq = 5;
+  [deprecated] u32 extraSeq2 = 6;
+  u32 extraSeq3 = 7;
 }
