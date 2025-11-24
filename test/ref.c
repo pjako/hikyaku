@@ -31,11 +31,11 @@ int main() {
         {.questsCompleted = 34, .bossesDefeated = 5, .secretsFound = 9, .rank = 4, .prestigeLevel = 0}
     };
     gen_Player player = {0};
-    player.has_id = true;
+    player.idExist = true;
     player.id = 22;
-    player.has_class = true;
+    player.classExist = true;
     player.class = gen_Class_fighter;
-    player.has_achievements = true;
+    player.achievementsExist = true;
     player.achievements.count = (uint32_t)countOf(achievements);
     player.achievements.items = achievements;
 

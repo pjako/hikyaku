@@ -30,11 +30,11 @@ static int test_example_roundtrip(const gen_SchemaInfo *schema) {
         {.questsCompleted = 30, .bossesDefeated = 9, .secretsFound = 7, .rank = 5, .prestigeLevel = 2},
     };
     gen_Player player = {0};
-    player.has_id = true;
+    player.idExist = true;
     player.id = 77;
-    player.has_class = true;
+    player.classExist = true;
     player.class = gen_Class_summoner;
-    player.has_achievements = true;
+    player.achievementsExist = true;
     player.achievements.count = 3;
     player.achievements.items = achievements;
 
@@ -62,13 +62,13 @@ static int test_example_roundtrip(const gen_SchemaInfo *schema) {
 
 static int test_entity_state_optionals(const gen_SchemaInfo *schema) {
     gen_PlayerState state = {0};
-    state.has_yaw = true;
+    state.yawExist = true;
     state.yaw = 17;
-    state.has_posX = true;
+    state.posXExist = true;
     state.posX = -1234;
-    state.has_posY = false;
-    state.has_posZ = true;
+    state.posYExist = false;
     state.posZ = 42;
+    state.posZExist = true;
 
     uint8_t encoded[128];
     gen_Buffer w;
@@ -83,10 +83,10 @@ static int test_entity_state_optionals(const gen_SchemaInfo *schema) {
     init_buf(&mem, arena, sizeof(arena));
 
     CHECK(gen_PlayerState_decode_compact(&decoded, &r, &mem, schema));
-    CHECK(decoded.has_yaw && decoded.yaw == 17);
-    CHECK(decoded.has_posX && decoded.posX == -1234);
-    CHECK(!decoded.has_posY);
-    CHECK(decoded.has_posZ && decoded.posZ == 42);
+    CHECK(decoded.yawExist && decoded.yaw == 17);
+    CHECK(decoded.posXExist && decoded.posX == -1234);
+    CHECK(!decoded.posY);
+    CHECK(decoded.posZExist && decoded.posZ == 42);
     return 0;
 }
 
@@ -120,9 +120,9 @@ static int test_array_read_write(const gen_SchemaInfo *schema) {
 static int test_skip_generic(const gen_SchemaInfo *schema) {
     gen_Achievements achievements[1] = { {.questsCompleted = 2, .bossesDefeated = 1, .secretsFound = 1, .rank = 1, .prestigeLevel = 0} };
     gen_Player player = {0};
-    player.has_id = true;
+    player.idExist = true;
     player.id = 123;
-    player.has_achievements = true;
+    player.achievementsExist = true;
     player.achievements.count = 1;
     player.achievements.items = achievements;
 

@@ -71,12 +71,12 @@ typedef struct gen_str8 {
 } gen_str8;
 
 GEN__API void gen_buffer_init(gen_Buffer *buffer, void *ptr, uint32_t size);
-typedef enum gen_WireType {
-    gen_WireType_Varint = 0,
-    gen_WireType_Fixed32 = 1,
-    gen_WireType_Fixed64 = 2,
-    gen_WireType_LengthDelimited = 3,
-} gen_WireType;
+typedef enum gen_wireType {
+    gen_wireType_Varint = 0,
+    gen_wireType_Fixed32 = 1,
+    gen_wireType_Fixed64 = 2,
+    gen_wireType_LengthDelimited = 3,
+} gen_wireType;
 
 typedef struct gen_Achievement gen_Achievement;
 typedef struct gen_StringAchievementPair gen_StringAchievementPair;
@@ -105,11 +105,11 @@ struct gen_StringAchievementPair {
 };
 
 struct gen_Player {
-    bool has_id;
+    bool idExist;
     uint32_t id;
-    bool has_colors;
+    bool colorsExist;
     gen_AchievementArray colors;
-    bool has_achievements;
+    bool achievementsExist;
     gen_StringAchievementPairArray achievements;
 };
 
@@ -470,24 +470,24 @@ bool gen_buffer_end_read_block(gen_Buffer *buffer, uint32_t block_end) {
     return true;
 }
 
-uint32_t gen_make_wire_tag(uint32_t field_id, gen_WireType wire) {
+uint32_t gen_make_wire_tag(uint32_t field_id, gen_wireType wire) {
     return (field_id << 2) | (uint32_t)wire;
 }
-bool gen_write_wire_tag(gen_Buffer *buffer, uint32_t field_id, gen_WireType wire) {
+bool gen_write_wire_tag(gen_Buffer *buffer, uint32_t field_id, gen_wireType wire) {
     return gen_write_var_u32(buffer, gen_make_wire_tag(field_id, wire));
 }
-bool gen_read_wire_tag(gen_Buffer *buffer, uint32_t *out_field_id, gen_WireType *out_wire) {
+bool gen_read_wire_tag(gen_Buffer *buffer, uint32_t *out_field_id, gen_wireType *out_wire) {
     uint32_t raw = 0;
     if (!gen_read_var_u32(buffer, &raw)) { return false; }
-    if (raw == 0) { *out_field_id = 0; *out_wire = gen_WireType_Varint; return true; }
+    if (raw == 0) { *out_field_id = 0; *out_wire = gen_wireType_Varint; return true; }
     *out_field_id = raw >> 2;
-    *out_wire = (gen_WireType)(raw & 0x3u);
+    *out_wire = (gen_wireType)(raw & 0x3u);
     return true;
 }
 
-bool gen_skip_wire_value(gen_Buffer *buffer, gen_WireType wire) {
+bool gen_skip_wire_value(gen_Buffer *buffer, gen_wireType wire) {
     switch (wire) {
-        case gen_WireType_Varint:
+        case gen_wireType_Varint:
         {
             while (true) {
                 uint8_t byte = 0;
@@ -496,11 +496,11 @@ bool gen_skip_wire_value(gen_Buffer *buffer, gen_WireType wire) {
             }
             return true;
         }
-        case gen_WireType_Fixed32:
+        case gen_wireType_Fixed32:
             return gen_buffer_skip_bytes(buffer, 4);
-        case gen_WireType_Fixed64:
+        case gen_wireType_Fixed64:
             return gen_buffer_skip_bytes(buffer, 8);
-        case gen_WireType_LengthDelimited:
+        case gen_wireType_LengthDelimited:
         {
             uint32_t len = 0;
             if (!gen_read_var_u32(buffer, &len)) { return false; }
@@ -929,7 +929,7 @@ bool gen_Achievement_decode_compact(gen_Achievement *value, gen_Buffer *buffer, 
 bool gen_Achievement_skip_compact(gen_Buffer *buffer) {
     while (true) {
         uint32_t field_id = 0;
-        gen_WireType wire = gen_WireType_Varint;
+        gen_wireType wire = gen_wireType_Varint;
         if (!gen_read_wire_tag(buffer, &field_id, &wire)) { return false; }
         if (field_id == 0) { break; }
         if (!gen_skip_wire_value(buffer, wire)) { return false; }
@@ -1001,7 +1001,7 @@ bool gen_StringAchievementPair_decode_compact(gen_StringAchievementPair *value, 
 bool gen_StringAchievementPair_skip_compact(gen_Buffer *buffer) {
     while (true) {
         uint32_t field_id = 0;
-        gen_WireType wire = gen_WireType_Varint;
+        gen_wireType wire = gen_wireType_Varint;
         if (!gen_read_wire_tag(buffer, &field_id, &wire)) { return false; }
         if (field_id == 0) { break; }
         if (!gen_skip_wire_value(buffer, wire)) { return false; }
@@ -1012,11 +1012,11 @@ bool gen_StringAchievementPair_skip_compact(gen_Buffer *buffer) {
 bool gen_Player_encode_compact(const gen_Player *value, gen_Buffer *buffer, const gen_SchemaInfo *schema) {
     (void)schema;
     if (true) {
-        if (!gen_write_wire_tag(buffer, gen_playerParameters_id, gen_WireType_Varint)) { return false; }
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_id, gen_wireType_Varint)) { return false; }
         if (!gen_write_var_u32(buffer, (uint32_t)value->id)) { return false; }
     }
     if (value->colors.count > 0) {
-        if (!gen_write_wire_tag(buffer, gen_playerParameters_colors, gen_WireType_LengthDelimited)) { return false; }
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_colors, gen_wireType_LengthDelimited)) { return false; }
         uint32_t block_marker = 0;
         if (!gen_buffer_begin_block(buffer, &block_marker)) { return false; }
         if (!gen_write_var_u32(buffer, value->colors.count)) { return false; }
@@ -1026,7 +1026,7 @@ bool gen_Player_encode_compact(const gen_Player *value, gen_Buffer *buffer, cons
         if (!gen_buffer_end_block(buffer, block_marker)) { return false; }
     }
     if (value->achievements.count > 0) {
-        if (!gen_write_wire_tag(buffer, gen_playerParameters_achievements, gen_WireType_LengthDelimited)) { return false; }
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_achievements, gen_wireType_LengthDelimited)) { return false; }
         uint32_t block_marker = 0;
         if (!gen_buffer_begin_block(buffer, &block_marker)) { return false; }
         if (!gen_write_var_u32(buffer, value->achievements.count)) { return false; }
@@ -1044,7 +1044,7 @@ bool gen_Player_decode_compact(gen_Player *value, gen_Buffer *buffer, gen_Buffer
     memset(value, 0, sizeof(*value));
     while (true) {
         uint32_t field_id = 0;
-        gen_WireType wire = gen_WireType_Varint;
+        gen_wireType wire = gen_wireType_Varint;
         if (!gen_read_wire_tag(buffer, &field_id, &wire)) { return false; }
         if (field_id == 0) { break; }
         switch (field_id) {
@@ -1057,7 +1057,7 @@ bool gen_Player_decode_compact(gen_Player *value, gen_Buffer *buffer, gen_Buffer
                 break;
             }
             case gen_playerParameters_colors: {
-                if (wire != gen_WireType_LengthDelimited) { return false; }
+                if (wire != gen_wireType_LengthDelimited) { return false; }
                 uint32_t block_end = 0;
                 if (!gen_buffer_begin_read_block(buffer, &block_end)) { return false; }
                 uint32_t count = 0;
@@ -1081,7 +1081,7 @@ bool gen_Player_decode_compact(gen_Player *value, gen_Buffer *buffer, gen_Buffer
                 break;
             }
             case gen_playerParameters_achievements: {
-                if (wire != gen_WireType_LengthDelimited) { return false; }
+                if (wire != gen_wireType_LengthDelimited) { return false; }
                 uint32_t block_end = 0;
                 if (!gen_buffer_begin_read_block(buffer, &block_end)) { return false; }
                 uint32_t count = 0;
@@ -1115,7 +1115,7 @@ bool gen_Player_decode_compact(gen_Player *value, gen_Buffer *buffer, gen_Buffer
 bool gen_Player_skip_compact(gen_Buffer *buffer) {
     while (true) {
         uint32_t field_id = 0;
-        gen_WireType wire = gen_WireType_Varint;
+        gen_wireType wire = gen_wireType_Varint;
         if (!gen_read_wire_tag(buffer, &field_id, &wire)) { return false; }
         if (field_id == 0) { break; }
         if (!gen_skip_wire_value(buffer, wire)) { return false; }
@@ -1295,7 +1295,7 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
         // Messages are length-delimited; skip fields until the terminator tag.
         while (true) {
             uint32_t field_id = 0;
-            gen_WireType wire = gen_WireType_Varint;
+            gen_wireType wire = gen_wireType_Varint;
             if (!gen_read_wire_tag(buffer, &field_id, &wire)) return false;
             if (field_id == 0) break;
             if (!gen_skip_wire_value(buffer, wire)) return false;

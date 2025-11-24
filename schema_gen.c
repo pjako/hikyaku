@@ -26,8 +26,8 @@
   
   1. Standard Encoding (Tag-Value)
      [Tag][Value]...
-     Tag = (FieldID << 2) | WireType
-     WireTypes: 0=Varint, 1=Fixed32, 2=Fixed64, 3=LengthDelimited
+     Tag = (FieldID << 2) | wireType
+     wireTypes: 0=Varint, 1=Fixed32, 2=Fixed64, 3=LengthDelimited
   
   2. Compact Encoding
      Designed for minimal size. Fields are written in schema order.
@@ -1308,9 +1308,9 @@ static void append_scalar_decode(StringBuilder *out, const Schema *schema, const
 static void wire_kind_literal(char *dst, size_t dst_size, const Schema *schema, const FieldDef *field) {
     if (field->is_array || type_is_struct_type(schema, field->type_name) ||
         type_is_f32(field_base_type(schema, field)) || type_is_f64(field_base_type(schema, field))) {
-        snprintf(dst, dst_size, "%sWireType_LengthDelimited", schema->prefix);
+        snprintf(dst, dst_size, "%swireType_LengthDelimited", schema->prefix);
     } else {
-        snprintf(dst, dst_size, "%sWireType_Varint", schema->prefix);
+        snprintf(dst, dst_size, "%swireType_Varint", schema->prefix);
     }
 }
 
@@ -1350,7 +1350,7 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
         uint32_t opt_idx = 0;
         for (size_t i = 0; i < def->field_count; ++i) {
             if (def->fields[i].is_optional) {
-                sb_append(impl, "    if (value->has_%s) { bitmask[%u] |= (1u << %u); }\n", def->fields[i].name, opt_idx / 8, opt_idx % 8);
+                sb_append(impl, "    if (value->%sExist) { bitmask[%u] |= (1u << %u); }\n", def->fields[i].name, opt_idx / 8, opt_idx % 8);
                 opt_idx++;
             }
         }
@@ -1365,7 +1365,7 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
         bool is_bitfield = field->bit_width > 0;
         
         if (field->is_optional) {
-            sb_append(impl, "    if (value->has_%s) {\n", field->name);
+            sb_append(impl, "    if (value->%sExist) {\n", field->name);
         }
 
         const char *indent = field->is_optional ? "        " : "    ";
@@ -1476,7 +1476,7 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
         const FieldDef *field = &def->fields[i];
         sb_append(impl, "                case %s_%s: {\n", enum_name, field->name);
         if (field->is_optional) {
-            sb_append(impl, "                    value->has_%s = true;\n", field->name);
+            sb_append(impl, "                    value->%sExist = true;\n", field->name);
         }
         
         const char *indent = "                    ";
@@ -1571,11 +1571,11 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
         bool is_bitfield = field->bit_width > 0;
         
         if (field->is_optional) {
-            sb_append(impl, "    value->has_%s = (bitmask[%u] >> %u) & 1u;\n", field->name, opt_idx / 8, opt_idx % 8);
+            sb_append(impl, "    value->%sExist = (bitmask[%u] >> %u) & 1u;\n", field->name, opt_idx / 8, opt_idx % 8);
             if (has_bitfields && !is_bitfield) {
                 sb_append(impl, "    %sbitreader_align(&bit_reader);\n", schema->prefix);
             }
-            sb_append(impl, "    if (value->has_%s) {\n", field->name);
+            sb_append(impl, "    if (value->%sExist) {\n", field->name);
             opt_idx++;
         } else {
             if (has_bitfields && !is_bitfield) {
@@ -1661,7 +1661,7 @@ static void append_struct_codec(StringBuilder *decls, StringBuilder *impl, const
     sb_append(impl,
         "    while (true) {\n"
         "        uint32_t field_id = 0;\n"
-        "        %sWireType wire = %sWireType_Varint;\n"
+        "        %swireType wire = %swireType_Varint;\n"
         "        if (!%sread_wire_tag(buffer, &field_id, &wire)) { return false; }\n"
         "        if (field_id == 0) { break; }\n"
         "        if (!%sskip_wire_value(buffer, wire)) { return false; }\n"
@@ -1694,7 +1694,7 @@ static void append_message_codec(StringBuilder *decls, StringBuilder *impl, cons
         
         char has_expr[256];
         if (field->is_optional) {
-            snprintf(has_expr, sizeof(has_expr), "value->has_%s", field->name);
+            snprintf(has_expr, sizeof(has_expr), "value->%sExist", field->name);
         } else if (field->is_array) {
             snprintf(has_expr, sizeof(has_expr), "value->%s.count > 0", field->name);
         } else {
@@ -1706,12 +1706,12 @@ static void append_message_codec(StringBuilder *decls, StringBuilder *impl, cons
         
         char wire_literal[256];
         if (field->is_array || type_is_struct_type(schema, field->type_name)) {
-            snprintf(wire_literal, sizeof(wire_literal), "%sWireType_LengthDelimited", schema->prefix);
+            snprintf(wire_literal, sizeof(wire_literal), "%swireType_LengthDelimited", schema->prefix);
         } else {
              const char *base = field_base_type(schema, field);
-             if (strcmp(base, "f32") == 0) snprintf(wire_literal, sizeof(wire_literal), "%sWireType_Fixed32", schema->prefix);
-             else if (strcmp(base, "f64") == 0) snprintf(wire_literal, sizeof(wire_literal), "%sWireType_Fixed64", schema->prefix);
-             else snprintf(wire_literal, sizeof(wire_literal), "%sWireType_Varint", schema->prefix);
+             if (strcmp(base, "f32") == 0) snprintf(wire_literal, sizeof(wire_literal), "%swireType_Fixed32", schema->prefix);
+             else if (strcmp(base, "f64") == 0) snprintf(wire_literal, sizeof(wire_literal), "%swireType_Fixed64", schema->prefix);
+             else snprintf(wire_literal, sizeof(wire_literal), "%swireType_Varint", schema->prefix);
         }
 
         sb_append(impl,
@@ -1767,7 +1767,7 @@ static void append_message_codec(StringBuilder *decls, StringBuilder *impl, cons
     sb_append(impl,
         "    while (true) {\n"
         "        uint32_t field_id = 0;\n"
-        "        %sWireType wire = %sWireType_Varint;\n"
+        "        %swireType wire = %swireType_Varint;\n"
         "        if (!%sread_wire_tag(buffer, &field_id, &wire)) { return false; }\n"
         "        if (field_id == 0) { break; }\n"
         "        switch (field_id) {\n",
@@ -1781,11 +1781,11 @@ static void append_message_codec(StringBuilder *decls, StringBuilder *impl, cons
         sb_append(impl, "            case %s: {\n", field_enum);
         
         if (field->is_optional) {
-            sb_append(impl, "                value->has_%s = true;\n", field->name);
+            sb_append(impl, "                value->%sExist = true;\n", field->name);
         }
         
         if (field->is_array) {
-            sb_append(impl, "                if (wire != %sWireType_LengthDelimited) { return false; }\n", schema->prefix);
+            sb_append(impl, "                if (wire != %swireType_LengthDelimited) { return false; }\n", schema->prefix);
             sb_append(impl, "                uint32_t block_end = 0;\n");
             sb_append(impl, "                if (!%sbuffer_begin_read_block(buffer, &block_end)) { return false; }\n", schema->prefix);
             sb_append(impl, "                uint32_t count = 0;\n");
@@ -1827,7 +1827,7 @@ static void append_message_codec(StringBuilder *decls, StringBuilder *impl, cons
                 "                if (!%sbuffer_end_read_block(buffer, block_end)) { return false; }\n",
                 field->name, field->name, schema->prefix);
         } else if (type_is_struct_type(schema, field->type_name)) {
-            sb_append(impl, "                if (wire != %sWireType_LengthDelimited) { return false; }\n", schema->prefix);
+            sb_append(impl, "                if (wire != %swireType_LengthDelimited) { return false; }\n", schema->prefix);
             sb_append(impl, "                uint32_t block_end = 0;\n");
             sb_append(impl, "                if (!%sbuffer_begin_read_block(buffer, &block_end)) { return false; }\n", schema->prefix);
             char nested[256];
@@ -1856,7 +1856,7 @@ static void append_message_codec(StringBuilder *decls, StringBuilder *impl, cons
     sb_append(impl,
         "    while (true) {\n"
         "        uint32_t field_id = 0;\n"
-        "        %sWireType wire = %sWireType_Varint;\n"
+        "        %swireType wire = %swireType_Varint;\n"
         "        if (!%sread_wire_tag(buffer, &field_id, &wire)) { return false; }\n"
         "        if (field_id == 0) { break; }\n"
         "        if (!%sskip_wire_value(buffer, wire)) { return false; }\n"
@@ -2056,12 +2056,12 @@ static void append_string_helpers(StringBuilder *decls, StringBuilder *impl, con
 
 static void append_wire_helpers(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
     sb_append(decls,
-        "typedef enum %sWireType {\n"
-        "    %sWireType_Varint = 0,\n"
-        "    %sWireType_Fixed32 = 1,\n"
-        "    %sWireType_Fixed64 = 2,\n"
-        "    %sWireType_LengthDelimited = 3,\n"
-        "} %sWireType;\n\n",
+        "typedef enum %swireType {\n"
+        "    %swireType_Varint = 0,\n"
+        "    %swireType_Fixed32 = 1,\n"
+        "    %swireType_Fixed64 = 2,\n"
+        "    %swireType_LengthDelimited = 3,\n"
+        "} %swireType;\n\n",
         schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix);
 
     sb_append(impl,
@@ -2143,32 +2143,32 @@ static void append_wire_helpers(StringBuilder *decls, StringBuilder *impl, const
         schema->prefix, schema->prefix, schema->prefix);
 
     sb_append(impl,
-        "uint32_t %smake_wire_tag(uint32_t field_id, %sWireType wire) {\n"
+        "uint32_t %smake_wire_tag(uint32_t field_id, %swireType wire) {\n"
         "    return (field_id << 2) | (uint32_t)wire;\n"
         "}\n",
         schema->prefix, schema->prefix);
 
     sb_append(impl,
-        "bool %swrite_wire_tag(%sBuffer *buffer, uint32_t field_id, %sWireType wire) {\n"
+        "bool %swrite_wire_tag(%sBuffer *buffer, uint32_t field_id, %swireType wire) {\n"
         "    return %swrite_var_u32(buffer, %smake_wire_tag(field_id, wire));\n"
         "}\n",
         schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix);
 
     sb_append(impl,
-        "bool %sread_wire_tag(%sBuffer *buffer, uint32_t *out_field_id, %sWireType *out_wire) {\n"
+        "bool %sread_wire_tag(%sBuffer *buffer, uint32_t *out_field_id, %swireType *out_wire) {\n"
         "    uint32_t raw = 0;\n"
         "    if (!%sread_var_u32(buffer, &raw)) { return false; }\n"
-        "    if (raw == 0) { *out_field_id = 0; *out_wire = %sWireType_Varint; return true; }\n"
+        "    if (raw == 0) { *out_field_id = 0; *out_wire = %swireType_Varint; return true; }\n"
         "    *out_field_id = raw >> 2;\n"
-        "    *out_wire = (%sWireType)(raw & 0x3u);\n"
+        "    *out_wire = (%swireType)(raw & 0x3u);\n"
         "    return true;\n"
         "}\n\n",
         schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix);
 
     sb_append(impl,
-        "bool %sskip_wire_value(%sBuffer *buffer, %sWireType wire) {\n"
+        "bool %sskip_wire_value(%sBuffer *buffer, %swireType wire) {\n"
         "    switch (wire) {\n"
-        "        case %sWireType_Varint:\n"
+        "        case %swireType_Varint:\n"
         "        {\n"
         "            while (true) {\n"
         "                uint8_t byte = 0;\n"
@@ -2177,11 +2177,11 @@ static void append_wire_helpers(StringBuilder *decls, StringBuilder *impl, const
         "            }\n"
         "            return true;\n"
         "        }\n"
-        "        case %sWireType_Fixed32:\n"
+        "        case %swireType_Fixed32:\n"
         "            return %sbuffer_skip_bytes(buffer, 4);\n"
-        "        case %sWireType_Fixed64:\n"
+        "        case %swireType_Fixed64:\n"
         "            return %sbuffer_skip_bytes(buffer, 8);\n"
-        "        case %sWireType_LengthDelimited:\n"
+        "        case %swireType_LengthDelimited:\n"
         "        {\n"
         "            uint32_t len = 0;\n"
         "            if (!%sread_var_u32(buffer, &len)) { return false; }\n"
@@ -2520,9 +2520,9 @@ static void append_struct_defs(StringBuilder *out, const Schema *schema) {
             const FieldDef *field = &def->fields[j];
             char buf[256];
             if (def->kind == STRUCT_KIND_MESSAGE) {
-                sb_append(out, "    bool has_%s;\n", field->name);
+                sb_append(out, "    bool %sExist;\n", field->name);
             } else if (field->is_optional) {
-                sb_append(out, "    bool has_%s;\n", field->name);
+                sb_append(out, "    bool %sExist;\n", field->name);
             }
             if (field->is_array) {
                 char array_name[256];
@@ -2677,8 +2677,8 @@ static void append_struct_io(StringBuilder *decls, StringBuilder *impl, const Sc
             const FieldDef *field = &def->fields[j];
             
             if (field->is_optional) {
-                sb_append(impl, "    value->has_%s = (bitmask[%u] >> %u) & 1u;\n", field->name, opt_idx / 8, opt_idx % 8);
-                sb_append(impl, "    if (value->has_%s) {\n", field->name);
+                sb_append(impl, "    value->%sExist = (bitmask[%u] >> %u) & 1u;\n", field->name, opt_idx / 8, opt_idx % 8);
+                sb_append(impl, "    if (value->%sExist) {\n", field->name);
                 opt_idx++;
             }
 
@@ -2756,7 +2756,7 @@ static void append_struct_io(StringBuilder *decls, StringBuilder *impl, const Sc
             opt_idx = 0;
             for (size_t j = 0; j < def->field_count; ++j) {
                 if (def->fields[j].is_optional) {
-                    sb_append(impl, "    if (value->has_%s) { bitmask[%u] |= (1u << %u); }\n", def->fields[j].name, opt_idx / 8, opt_idx % 8);
+                    sb_append(impl, "    if (value->%sExist) { bitmask[%u] |= (1u << %u); }\n", def->fields[j].name, opt_idx / 8, opt_idx % 8);
                     opt_idx++;
                 }
             }
@@ -2767,7 +2767,7 @@ static void append_struct_io(StringBuilder *decls, StringBuilder *impl, const Sc
             const FieldDef *field = &def->fields[j];
             
             if (field->is_optional) {
-                sb_append(impl, "    if (value->has_%s) {\n", field->name);
+                sb_append(impl, "    if (value->%sExist) {\n", field->name);
             }
 
             const char *indent = field->is_optional ? "        " : "    ";
@@ -3568,7 +3568,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "        // Messages are length-delimited; skip fields until the terminator tag.\n"
         "        while (true) {\n"
         "            uint32_t field_id = 0;\n"
-        "            %sWireType wire = %sWireType_Varint;\n"
+        "            %swireType wire = %swireType_Varint;\n"
         "            if (!%sread_wire_tag(buffer, &field_id, &wire)) return false;\n"
         "            if (field_id == 0) break;\n"
         "            if (!%sskip_wire_value(buffer, wire)) return false;\n"

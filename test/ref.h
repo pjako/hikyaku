@@ -71,12 +71,12 @@ typedef struct gen_str8 {
 } gen_str8;
 
 GEN__API void gen_buffer_init(gen_Buffer *buffer, void *ptr, uint32_t size);
-typedef enum gen_WireType {
-    gen_WireType_Varint = 0,
-    gen_WireType_Fixed32 = 1,
-    gen_WireType_Fixed64 = 2,
-    gen_WireType_LengthDelimited = 3,
-} gen_WireType;
+typedef enum gen_wireType {
+    gen_wireType_Varint = 0,
+    gen_wireType_Fixed32 = 1,
+    gen_wireType_Fixed64 = 2,
+    gen_wireType_LengthDelimited = 3,
+} gen_wireType;
 
 typedef struct gen_Achievements gen_Achievements;
 typedef struct gen_PlayerState gen_PlayerState;
@@ -118,13 +118,13 @@ struct gen_Achievements {
 };
 
 struct gen_PlayerState {
-    bool has_yaw;
+    bool yawExist;
     u32 yaw : 10;
-    bool has_posX;
+    bool posXExist;
     i32 posX : 20;
-    bool has_posY;
+    bool posYExist;
     i32 posY : 20;
-    bool has_posZ;
+    bool posZExist;
     i32 posZ : 20;
 };
 
@@ -134,19 +134,19 @@ struct gen_StringAchievementsPair {
 };
 
 struct gen_Player {
-    bool has_id;
+    bool idExist;
     u32 id;
-    bool has_flags;
+    bool flagsExist;
     gen_PlayerFlags flags;
-    bool has_class;
+    bool classExist;
     gen_Class class;
-    bool has_achievements;
+    bool achievementsExist;
     gen_AchievementsArray achievements;
-    bool has_extraSeq3;
+    bool extraSeq3Exist;
     u32 extraSeq3;
-    bool has_map;
+    bool mapExist;
     gen_StringAchievementsPairArray map;
-    bool has_extraSeq2;
+    bool extraSeq2Exist;
     u32 extraSeq2 GEN_DEPRECATED("deprecated");
 };
 
@@ -513,24 +513,24 @@ bool gen_buffer_end_read_block(gen_Buffer *buffer, uint32_t block_end) {
     return true;
 }
 
-uint32_t gen_make_wire_tag(uint32_t field_id, gen_WireType wire) {
+uint32_t gen_make_wire_tag(uint32_t field_id, gen_wireType wire) {
     return (field_id << 2) | (uint32_t)wire;
 }
-bool gen_write_wire_tag(gen_Buffer *buffer, uint32_t field_id, gen_WireType wire) {
+bool gen_write_wire_tag(gen_Buffer *buffer, uint32_t field_id, gen_wireType wire) {
     return gen_write_var_u32(buffer, gen_make_wire_tag(field_id, wire));
 }
-bool gen_read_wire_tag(gen_Buffer *buffer, uint32_t *out_field_id, gen_WireType *out_wire) {
+bool gen_read_wire_tag(gen_Buffer *buffer, uint32_t *out_field_id, gen_wireType *out_wire) {
     uint32_t raw = 0;
     if (!gen_read_var_u32(buffer, &raw)) { return false; }
-    if (raw == 0) { *out_field_id = 0; *out_wire = gen_WireType_Varint; return true; }
+    if (raw == 0) { *out_field_id = 0; *out_wire = gen_wireType_Varint; return true; }
     *out_field_id = raw >> 2;
-    *out_wire = (gen_WireType)(raw & 0x3u);
+    *out_wire = (gen_wireType)(raw & 0x3u);
     return true;
 }
 
-bool gen_skip_wire_value(gen_Buffer *buffer, gen_WireType wire) {
+bool gen_skip_wire_value(gen_Buffer *buffer, gen_wireType wire) {
     switch (wire) {
-        case gen_WireType_Varint:
+        case gen_wireType_Varint:
         {
             while (true) {
                 uint8_t byte = 0;
@@ -539,11 +539,11 @@ bool gen_skip_wire_value(gen_Buffer *buffer, gen_WireType wire) {
             }
             return true;
         }
-        case gen_WireType_Fixed32:
+        case gen_wireType_Fixed32:
             return gen_buffer_skip_bytes(buffer, 4);
-        case gen_WireType_Fixed64:
+        case gen_wireType_Fixed64:
             return gen_buffer_skip_bytes(buffer, 8);
-        case gen_WireType_LengthDelimited:
+        case gen_wireType_LengthDelimited:
         {
             uint32_t len = 0;
             if (!gen_read_var_u32(buffer, &len)) { return false; }
@@ -860,8 +860,8 @@ bool gen_PlayerState_read(gen_PlayerState *value, gen_Buffer *buffer, gen_Buffer
     memset(value, 0, sizeof(*value));
     uint8_t bitmask[1];
     if (!gen_buffer_read_bytes(buffer, bitmask, sizeof(bitmask))) { return false; }
-    value->has_yaw = (bitmask[0] >> 0) & 1u;
-    if (value->has_yaw) {
+    value->yawExist = (bitmask[0] >> 0) & 1u;
+    if (value->yawExist) {
         {
             u32 temp;
             if (!gen_buffer_read_u32(buffer, &temp)) { return false; }
@@ -870,8 +870,8 @@ bool gen_PlayerState_read(gen_PlayerState *value, gen_Buffer *buffer, gen_Buffer
             value->yaw = (u32)masked;
         }
     }
-    value->has_posX = (bitmask[0] >> 1) & 1u;
-    if (value->has_posX) {
+    value->posXExist = (bitmask[0] >> 1) & 1u;
+    if (value->posXExist) {
         {
             i32 temp;
             if (!gen_buffer_read_i32(buffer, &temp)) { return false; }
@@ -882,8 +882,8 @@ bool gen_PlayerState_read(gen_PlayerState *value, gen_Buffer *buffer, gen_Buffer
             value->posX = (i32)masked;
         }
     }
-    value->has_posY = (bitmask[0] >> 2) & 1u;
-    if (value->has_posY) {
+    value->posYExist = (bitmask[0] >> 2) & 1u;
+    if (value->posYExist) {
         {
             i32 temp;
             if (!gen_buffer_read_i32(buffer, &temp)) { return false; }
@@ -894,8 +894,8 @@ bool gen_PlayerState_read(gen_PlayerState *value, gen_Buffer *buffer, gen_Buffer
             value->posY = (i32)masked;
         }
     }
-    value->has_posZ = (bitmask[0] >> 3) & 1u;
-    if (value->has_posZ) {
+    value->posZExist = (bitmask[0] >> 3) & 1u;
+    if (value->posZExist) {
         {
             i32 temp;
             if (!gen_buffer_read_i32(buffer, &temp)) { return false; }
@@ -913,12 +913,12 @@ bool gen_PlayerState_write(const gen_PlayerState *value, gen_Buffer *buffer, con
     (void)schema;
     uint8_t bitmask[1];
     memset(bitmask, 0, sizeof(bitmask));
-    if (value->has_yaw) { bitmask[0] |= (1u << 0); }
-    if (value->has_posX) { bitmask[0] |= (1u << 1); }
-    if (value->has_posY) { bitmask[0] |= (1u << 2); }
-    if (value->has_posZ) { bitmask[0] |= (1u << 3); }
+    if (value->yawExist) { bitmask[0] |= (1u << 0); }
+    if (value->posXExist) { bitmask[0] |= (1u << 1); }
+    if (value->posYExist) { bitmask[0] |= (1u << 2); }
+    if (value->posZExist) { bitmask[0] |= (1u << 3); }
     if (!gen_buffer_write_bytes(buffer, bitmask, sizeof(bitmask))) { return false; }
-    if (value->has_yaw) {
+    if (value->yawExist) {
         {
             u32 temp;
             const uint64_t mask = ((UINT64_C(1) << 10) - UINT64_C(1));
@@ -927,7 +927,7 @@ bool gen_PlayerState_write(const gen_PlayerState *value, gen_Buffer *buffer, con
             if (!gen_buffer_write_u32(buffer, temp)) { return false; }
         }
     }
-    if (value->has_posX) {
+    if (value->posXExist) {
         {
             i32 temp;
             const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
@@ -938,7 +938,7 @@ bool gen_PlayerState_write(const gen_PlayerState *value, gen_Buffer *buffer, con
             if (!gen_buffer_write_i32(buffer, temp)) { return false; }
         }
     }
-    if (value->has_posY) {
+    if (value->posYExist) {
         {
             i32 temp;
             const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
@@ -949,7 +949,7 @@ bool gen_PlayerState_write(const gen_PlayerState *value, gen_Buffer *buffer, con
             if (!gen_buffer_write_i32(buffer, temp)) { return false; }
         }
     }
-    if (value->has_posZ) {
+    if (value->posZExist) {
         {
             i32 temp;
             const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
@@ -1160,7 +1160,7 @@ bool gen_Achievements_decode_compact(gen_Achievements *value, gen_Buffer *buffer
 bool gen_Achievements_skip_compact(gen_Buffer *buffer) {
     while (true) {
         uint32_t field_id = 0;
-        gen_WireType wire = gen_WireType_Varint;
+        gen_wireType wire = gen_wireType_Varint;
         if (!gen_read_wire_tag(buffer, &field_id, &wire)) { return false; }
         if (field_id == 0) { break; }
         if (!gen_skip_wire_value(buffer, wire)) { return false; }
@@ -1172,13 +1172,13 @@ bool gen_PlayerState_encode_compact(const gen_PlayerState *value, gen_Buffer *bu
     (void)schema;
     uint8_t bitmask[1];
     memset(bitmask, 0, sizeof(bitmask));
-    if (value->has_yaw) { bitmask[0] |= (1u << 0); }
-    if (value->has_posX) { bitmask[0] |= (1u << 1); }
-    if (value->has_posY) { bitmask[0] |= (1u << 2); }
-    if (value->has_posZ) { bitmask[0] |= (1u << 3); }
+    if (value->yawExist) { bitmask[0] |= (1u << 0); }
+    if (value->posXExist) { bitmask[0] |= (1u << 1); }
+    if (value->posYExist) { bitmask[0] |= (1u << 2); }
+    if (value->posZExist) { bitmask[0] |= (1u << 3); }
     if (!gen_buffer_write_bytes(buffer, bitmask, sizeof(bitmask))) { return false; }
     gen_BitWriter bit_writer = {0, 0};
-    if (value->has_yaw) {
+    if (value->yawExist) {
         {
         u32 bw_value;
             const uint64_t mask = ((UINT64_C(1) << 10) - UINT64_C(1));
@@ -1187,7 +1187,7 @@ bool gen_PlayerState_encode_compact(const gen_PlayerState *value, gen_Buffer *bu
             if (!gen_bitwriter_write(&bit_writer, buffer, (uint64_t)bw_value, 10)) { return false; }
         }
     }
-    if (value->has_posX) {
+    if (value->posXExist) {
         {
         i32 bw_value;
             const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
@@ -1198,7 +1198,7 @@ bool gen_PlayerState_encode_compact(const gen_PlayerState *value, gen_Buffer *bu
             if (!gen_bitwriter_write(&bit_writer, buffer, (uint64_t)bw_value, 20)) { return false; }
         }
     }
-    if (value->has_posY) {
+    if (value->posYExist) {
         {
         i32 bw_value;
             const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
@@ -1209,7 +1209,7 @@ bool gen_PlayerState_encode_compact(const gen_PlayerState *value, gen_Buffer *bu
             if (!gen_bitwriter_write(&bit_writer, buffer, (uint64_t)bw_value, 20)) { return false; }
         }
     }
-    if (value->has_posZ) {
+    if (value->posZExist) {
         {
         i32 bw_value;
             const uint64_t mask = ((UINT64_C(1) << 20) - UINT64_C(1));
@@ -1260,7 +1260,7 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
             if (!present) continue;
             switch (type->fields[i].mapping) {
                 case gen_playerStateParameters_yaw: {
-                    value->has_yaw = true;
+                    value->yawExist = true;
                     {
                         uint64_t bw_raw = 0;
                         if (!gen_bitreader_read(&bit_reader, buffer, 10, &bw_raw)) { return false; }
@@ -1271,7 +1271,7 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
                     break;
                 }
                 case gen_playerStateParameters_posX: {
-                    value->has_posX = true;
+                    value->posXExist = true;
                     {
                         uint64_t bw_raw = 0;
                         if (!gen_bitreader_read(&bit_reader, buffer, 20, &bw_raw)) { return false; }
@@ -1284,7 +1284,7 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
                     break;
                 }
                 case gen_playerStateParameters_posY: {
-                    value->has_posY = true;
+                    value->posYExist = true;
                     {
                         uint64_t bw_raw = 0;
                         if (!gen_bitreader_read(&bit_reader, buffer, 20, &bw_raw)) { return false; }
@@ -1297,7 +1297,7 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
                     break;
                 }
                 case gen_playerStateParameters_posZ: {
-                    value->has_posZ = true;
+                    value->posZExist = true;
                     {
                         uint64_t bw_raw = 0;
                         if (!gen_bitreader_read(&bit_reader, buffer, 20, &bw_raw)) { return false; }
@@ -1319,8 +1319,8 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
 
     uint8_t bitmask[1];
     if (!gen_buffer_read_bytes(buffer, bitmask, sizeof(bitmask))) { return false; }
-    value->has_yaw = (bitmask[0] >> 0) & 1u;
-    if (value->has_yaw) {
+    value->yawExist = (bitmask[0] >> 0) & 1u;
+    if (value->yawExist) {
         {
             uint64_t bw_raw = 0;
             if (!gen_bitreader_read(&bit_reader, buffer, 10, &bw_raw)) { return false; }
@@ -1329,8 +1329,8 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
             value->yaw = (u32)masked;
         }
     }
-    value->has_posX = (bitmask[0] >> 1) & 1u;
-    if (value->has_posX) {
+    value->posXExist = (bitmask[0] >> 1) & 1u;
+    if (value->posXExist) {
         {
             uint64_t bw_raw = 0;
             if (!gen_bitreader_read(&bit_reader, buffer, 20, &bw_raw)) { return false; }
@@ -1341,8 +1341,8 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
             value->posX = (i32)masked;
         }
     }
-    value->has_posY = (bitmask[0] >> 2) & 1u;
-    if (value->has_posY) {
+    value->posYExist = (bitmask[0] >> 2) & 1u;
+    if (value->posYExist) {
         {
             uint64_t bw_raw = 0;
             if (!gen_bitreader_read(&bit_reader, buffer, 20, &bw_raw)) { return false; }
@@ -1353,8 +1353,8 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
             value->posY = (i32)masked;
         }
     }
-    value->has_posZ = (bitmask[0] >> 3) & 1u;
-    if (value->has_posZ) {
+    value->posZExist = (bitmask[0] >> 3) & 1u;
+    if (value->posZExist) {
         {
             uint64_t bw_raw = 0;
             if (!gen_bitreader_read(&bit_reader, buffer, 20, &bw_raw)) { return false; }
@@ -1371,7 +1371,7 @@ bool gen_PlayerState_decode_compact(gen_PlayerState *value, gen_Buffer *buffer, 
 bool gen_PlayerState_skip_compact(gen_Buffer *buffer) {
     while (true) {
         uint32_t field_id = 0;
-        gen_WireType wire = gen_WireType_Varint;
+        gen_wireType wire = gen_wireType_Varint;
         if (!gen_read_wire_tag(buffer, &field_id, &wire)) { return false; }
         if (field_id == 0) { break; }
         if (!gen_skip_wire_value(buffer, wire)) { return false; }
@@ -1443,7 +1443,7 @@ bool gen_StringAchievementsPair_decode_compact(gen_StringAchievementsPair *value
 bool gen_StringAchievementsPair_skip_compact(gen_Buffer *buffer) {
     while (true) {
         uint32_t field_id = 0;
-        gen_WireType wire = gen_WireType_Varint;
+        gen_wireType wire = gen_wireType_Varint;
         if (!gen_read_wire_tag(buffer, &field_id, &wire)) { return false; }
         if (field_id == 0) { break; }
         if (!gen_skip_wire_value(buffer, wire)) { return false; }
@@ -1454,19 +1454,19 @@ bool gen_StringAchievementsPair_skip_compact(gen_Buffer *buffer) {
 bool gen_Player_encode_compact(const gen_Player *value, gen_Buffer *buffer, const gen_SchemaInfo *schema) {
     (void)schema;
     if (true) {
-        if (!gen_write_wire_tag(buffer, gen_playerParameters_id, gen_WireType_Varint)) { return false; }
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_id, gen_wireType_Varint)) { return false; }
         if (!gen_write_var_u32(buffer, (uint32_t)value->id)) { return false; }
     }
     if (true) {
-        if (!gen_write_wire_tag(buffer, gen_playerParameters_flags, gen_WireType_Varint)) { return false; }
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_flags, gen_wireType_Varint)) { return false; }
         if (!gen_buffer_write_u8(buffer, value->flags)) { return false; }
     }
     if (true) {
-        if (!gen_write_wire_tag(buffer, gen_playerParameters_class, gen_WireType_Varint)) { return false; }
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_class, gen_wireType_Varint)) { return false; }
         if (!gen_write_var_u32(buffer, (uint32_t)value->class)) { return false; }
     }
     if (value->achievements.count > 0) {
-        if (!gen_write_wire_tag(buffer, gen_playerParameters_achievements, gen_WireType_LengthDelimited)) { return false; }
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_achievements, gen_wireType_LengthDelimited)) { return false; }
         uint32_t block_marker = 0;
         if (!gen_buffer_begin_block(buffer, &block_marker)) { return false; }
         if (!gen_write_var_u32(buffer, value->achievements.count)) { return false; }
@@ -1476,11 +1476,11 @@ bool gen_Player_encode_compact(const gen_Player *value, gen_Buffer *buffer, cons
         if (!gen_buffer_end_block(buffer, block_marker)) { return false; }
     }
     if (true) {
-        if (!gen_write_wire_tag(buffer, gen_playerParameters_extraSeq3, gen_WireType_Varint)) { return false; }
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_extraSeq3, gen_wireType_Varint)) { return false; }
         if (!gen_write_var_u32(buffer, (uint32_t)value->extraSeq3)) { return false; }
     }
     if (value->map.count > 0) {
-        if (!gen_write_wire_tag(buffer, gen_playerParameters_map, gen_WireType_LengthDelimited)) { return false; }
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_map, gen_wireType_LengthDelimited)) { return false; }
         uint32_t block_marker = 0;
         if (!gen_buffer_begin_block(buffer, &block_marker)) { return false; }
         if (!gen_write_var_u32(buffer, value->map.count)) { return false; }
@@ -1490,7 +1490,7 @@ bool gen_Player_encode_compact(const gen_Player *value, gen_Buffer *buffer, cons
         if (!gen_buffer_end_block(buffer, block_marker)) { return false; }
     }
     if (true) {
-        if (!gen_write_wire_tag(buffer, gen_playerParameters_extraSeq2, gen_WireType_Varint)) { return false; }
+        if (!gen_write_wire_tag(buffer, gen_playerParameters_extraSeq2, gen_wireType_Varint)) { return false; }
         if (!gen_write_var_u32(buffer, (uint32_t)value->extraSeq2)) { return false; }
     }
     if (!gen_write_var_u32(buffer, 0)) { return false; }
@@ -1502,7 +1502,7 @@ bool gen_Player_decode_compact(gen_Player *value, gen_Buffer *buffer, gen_Buffer
     memset(value, 0, sizeof(*value));
     while (true) {
         uint32_t field_id = 0;
-        gen_WireType wire = gen_WireType_Varint;
+        gen_wireType wire = gen_wireType_Varint;
         if (!gen_read_wire_tag(buffer, &field_id, &wire)) { return false; }
         if (field_id == 0) { break; }
         switch (field_id) {
@@ -1527,7 +1527,7 @@ bool gen_Player_decode_compact(gen_Player *value, gen_Buffer *buffer, gen_Buffer
                 break;
             }
             case gen_playerParameters_achievements: {
-                if (wire != gen_WireType_LengthDelimited) { return false; }
+                if (wire != gen_wireType_LengthDelimited) { return false; }
                 uint32_t block_end = 0;
                 if (!gen_buffer_begin_read_block(buffer, &block_end)) { return false; }
                 uint32_t count = 0;
@@ -1559,7 +1559,7 @@ bool gen_Player_decode_compact(gen_Player *value, gen_Buffer *buffer, gen_Buffer
                 break;
             }
             case gen_playerParameters_map: {
-                if (wire != gen_WireType_LengthDelimited) { return false; }
+                if (wire != gen_wireType_LengthDelimited) { return false; }
                 uint32_t block_end = 0;
                 if (!gen_buffer_begin_read_block(buffer, &block_end)) { return false; }
                 uint32_t count = 0;
@@ -1601,7 +1601,7 @@ bool gen_Player_decode_compact(gen_Player *value, gen_Buffer *buffer, gen_Buffer
 bool gen_Player_skip_compact(gen_Buffer *buffer) {
     while (true) {
         uint32_t field_id = 0;
-        gen_WireType wire = gen_WireType_Varint;
+        gen_wireType wire = gen_wireType_Varint;
         if (!gen_read_wire_tag(buffer, &field_id, &wire)) { return false; }
         if (field_id == 0) { break; }
         if (!gen_skip_wire_value(buffer, wire)) { return false; }
@@ -1791,18 +1791,10 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
     
     // STRUCT or MESSAGE
     if (type->kind == 2) { // MESSAGE
-        // Messages are length delimited in some contexts, but here we assume compact stream
-        // Wait, messages in compact encoding are just structs with ID field.
-        // But wait, `append_message_codec` uses `write_wire_tag` and blocks for optional fields.
-        // If we are skipping a message in a compact stream, it might be encoded as a struct (recursively) OR as a block.
-        // In `append_struct_codec`, nested structs are just `_encode_compact`.
-        // In `append_message_codec`, nested structs are `_encode_compact`.
-        // So they are just fields.
-        // BUT, `append_message_codec` writes a 0 tag at the end.
-        // So we need to skip until tag 0.
+        // Messages are length-delimited; skip fields until the terminator tag.
         while (true) {
             uint32_t field_id = 0;
-            gen_WireType wire = gen_WireType_Varint;
+            gen_wireType wire = gen_wireType_Varint;
             if (!gen_read_wire_tag(buffer, &field_id, &wire)) return false;
             if (field_id == 0) break;
             if (!gen_skip_wire_value(buffer, wire)) return false;
@@ -1811,7 +1803,7 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
     }
     
     // STRUCT
-    // Read bitmask
+    // Read bitmask for optional fields
     uint32_t optional_count = 0;
     bool has_bitfields = false;
     for (uint32_t i = 0; i < type->field_count; ++i) {
@@ -1823,16 +1815,6 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
     uint8_t *bitmask = NULL;
     if (optional_count > 0) {
         uint32_t bytes = (optional_count + 7) / 8;
-        // We need to read bytes but not store them permanently, just on stack or skip
-        // But we need them to know which optionals to skip.
-        // We can allocate on stack if small, or use allocator? No allocator passed here.
-        // Use a small fixed buffer or alloca? standard C99 doesn't have alloca.
-        // Let's use a fixed max size (e.g. 64 bytes = 512 optionals) or just read byte by byte?
-        // We can't read byte by byte easily because we need random access or sequential access.
-        // Sequential access is fine. We iterate fields.
-        // But the bitmask is at the START.
-        // So we must read it all.
-        // Let's assume a max of 128 bytes (1024 optionals). If more, fail.
         if (bytes > 128) return false;
         uint8_t mask_buf[128];
         if (!gen_buffer_read_bytes(buffer, mask_buf, bytes)) return false;
