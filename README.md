@@ -21,9 +21,9 @@ The program is intentionally freestanding—no libraries beyond the C runtime ar
 
 This emits:
 1. `output.h` – the generated header (definitions + optional implementation when `PREFIX_IMPLEMENTATION` is defined).
-2. `output.hibinschema` – a compact binary schema that mirrors the textual schema. It can be parsed at runtime via `parse_schema` or embedded through helper APIs.
+2. `output.hischemabin` – a compact binary schema that mirrors the textual schema. It can be parsed at runtime via `parse_schema` or embedded through helper APIs.
 
-By default the generator will **refuse to overwrite** an existing `output.hibinschema` if it detects backwards-incompatible changes (e.g., enum/struct removal, changing field types/flags/ids). Pass `--ignore-compat` to skip this guard when you intentionally break compatibility.
+By default the generator will **refuse to overwrite** an existing `output.hischemabin` if it detects backwards-incompatible changes (e.g., enum/struct removal, changing field types/flags/ids). Pass `--ignore-compat` to skip this guard when you intentionally break compatibility.
 
 ### Compatibility guard (why changes are blocked)
 Binary schemas are meant to be stable contracts: downstream code that reads an older stream must be able to decode packets emitted by newer writers. Because of that the generator enforces:
