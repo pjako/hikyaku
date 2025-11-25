@@ -15,7 +15,15 @@ typedef float    f32;
 typedef double   f64;
 
 #define GEN__IMPLEMENTATION
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
 #include "ref.h"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "CHECK failed: %s at %s:%d\n", #x, __FILE__, __LINE__); return 1; } } while (0)
 
@@ -138,8 +146,40 @@ static int test_skip_generic(const gen_SchemaInfo *schema) {
     return 0;
 }
 
+static int test_union_roundtrip(const gen_SchemaInfo *schema) {
+    gen_EventEnvelope env = {0};
+    env.idExist = true;
+    env.id = 77;
+    env.payload.tag = gen_eventPayloadTag_state;
+    env.payload.value.state.yawExist = true;
+    env.payload.value.state.yaw = 511;
+    env.payload.value.state.posXExist = true;
+    env.payload.value.state.posX = -12;
+
+    uint8_t encoded[256];
+    gen_Buffer w;
+    init_buf(&w, encoded, sizeof(encoded));
+    CHECK(gen_EventEnvelope_encode_compact(&env, &w, schema));
+
+    gen_Buffer r;
+    init_buf(&r, encoded, w.used);
+    uint8_t arena[256];
+    gen_Buffer mem;
+    init_buf(&mem, arena, sizeof(arena));
+    gen_EventEnvelope decoded = {0};
+    CHECK(gen_EventEnvelope_decode_compact(&decoded, &r, &mem, schema));
+
+    CHECK(decoded.id == 77);
+    CHECK(decoded.payload.tag == gen_eventPayloadTag_state);
+    CHECK(decoded.payload.value.state.yawExist);
+    CHECK(decoded.payload.value.state.yaw == 511);
+    CHECK(decoded.payload.value.state.posXExist);
+    CHECK(decoded.payload.value.state.posX == -12);
+    return 0;
+}
+
 int main(void) {
-    uint8_t schema_storage[1024];
+    uint8_t schema_storage[2048];
     gen_Buffer schema_buf;
     init_buf(&schema_buf, schema_storage, sizeof(schema_storage));
     const gen_SchemaInfo *schema = gen_get_embedded_schema(&schema_buf);
@@ -149,6 +189,7 @@ int main(void) {
     CHECK(test_entity_state_optionals(schema) == 0);
     CHECK(test_array_read_write(schema) == 0);
     CHECK(test_skip_generic(schema) == 0);
+    CHECK(test_union_roundtrip(schema) == 0);
 
     puts("extended tests passed");
     return 0;

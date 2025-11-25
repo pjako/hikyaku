@@ -6,7 +6,7 @@
 - Generates header-only C APIs and matching binary schema blobs from a single schema file.
 - Produces both struct/message definitions and encode/decode/skip helpers for **Standard** (wire-tag) and **Compact** (tagless) encodings.
 - Works entirely on `stdint.h`-style primitives plus enums/structs, no external dependencies beyond the C standard library.
-- Handles optional fields, arrays, user-defined types/aliases, endianness, and schema reflection data for runtime validation.
+- Handles optional fields, arrays, user-defined types/aliases, tagged unions, endianness, and schema reflection data for runtime validation.
 
 ## Building
 ```bash
@@ -46,6 +46,7 @@ The `.hischema` language is kept deliberately small:
 | `bitset Flags : u16 { a, b=4, c }` | Declares a flag set with single-bit values on an unsigned base (u8/u16/u32/u64). |
 | `struct Packet { ... }` | Declares POD structs encoded compactly. |
 | `message Ping { ... }` | Similar to `struct`, but when encoded in Standard mode each field is tagged (`id = N` fields reserve IDs). |
+| `union Payload : u16 { Foo foo = 1; Bar bar = 2; }` | Tagged unions with explicit discriminator base (`u8/u16/u32/u64`) and variant ids; emits a tag enum + C union wrapper plus codecs. |
 | `map<string, Value> entries;` | Declares a map; expands to an array of synthesized `<Key><Value>Pair` structs (see Maps below). |
 
 `gentype` only changes the emitted C type; the schema still refers to the logical name (`logical` in the table above), so wire layouts and runtime metadata remain unchanged while you plug in your own typedefs.
@@ -62,6 +63,17 @@ Message field numbering (Standard encoding):
 - Retired ids stay blocked forever via `[removed]`; unknown/removed ids are skipped safely while decoding.
 
 Messages automatically synthesize an `id` field when `id = <number>;` appears inside the definition.
+
+### Tagged unions
+`union Name : u16 { TypeA a = 1; TypeB b = 2; }` declares a tagged union. The base type (`u8/u16/u32/u64`) is used for the discriminator. Each variant must specify a unique numeric id. Generated C emits:
+```c
+typedef enum prefix_nameTag { prefix_nameTag_a = 1, prefix_nameTag_b = 2 } prefix_nameTag;
+typedef struct prefix_Name {
+    prefix_nameTag tag;
+    union { prefix_TypeA a; prefix_TypeB b; } value;
+} prefix_Name;
+```
+Codecs: Standard/Compact encode the discriminator first, then the selected arm; skip helpers dispatch on the tag. Compatibility guard treats variant removals/renames/type changes as breaking; adding new variants is allowed.
 
 Bit-width annotations now affect both the generated C struct layout and compact wire format: consecutive bit-width scalars are appended bit-by-bit (LSB-first), then padded to the next byte boundary before any following non-bit-width field or at struct end. Optional fields still use the leading presence bitmask, and arrays cannot specify bit widths.
 

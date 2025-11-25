@@ -82,6 +82,8 @@ typedef struct gen_Achievements gen_Achievements;
 typedef struct gen_PlayerState gen_PlayerState;
 typedef struct gen_StringAchievementsPair gen_StringAchievementsPair;
 typedef struct gen_Player gen_Player;
+typedef struct gen_EventEnvelope gen_EventEnvelope;
+typedef struct gen_EventPayload gen_EventPayload;
 
 typedef struct gen_AchievementsArray gen_AchievementsArray;
 typedef struct gen_StringAchievementsPairArray gen_StringAchievementsPairArray;
@@ -133,6 +135,19 @@ struct gen_StringAchievementsPair {
     gen_Achievements value;
 };
 
+typedef enum gen_eventPayloadTag {
+    gen_eventPayloadTag_achievements = 1,
+    gen_eventPayloadTag_state = 2,
+} gen_eventPayloadTag;
+
+struct gen_EventPayload {
+    gen_eventPayloadTag tag;
+    union {
+        gen_Achievements achievements;
+        gen_PlayerState state;
+    } value;
+};
+
 struct gen_Player {
     bool idExist;
     u32 id;
@@ -150,6 +165,13 @@ struct gen_Player {
     u32 extraSeq2 GEN_DEPRECATED("deprecated");
 };
 
+struct gen_EventEnvelope {
+    bool idExist;
+    u32 id;
+    bool payloadExist;
+    gen_EventPayload payload;
+};
+
 GEN__API bool gen_AchievementsArray_read(gen_AchievementsArray *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema);
 GEN__API bool gen_AchievementsArray_write(const gen_AchievementsArray *value, gen_Buffer *buffer, const gen_SchemaInfo *schema);
 GEN__API bool gen_StringAchievementsPairArray_read(gen_StringAchievementsPairArray *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema);
@@ -162,6 +184,10 @@ GEN__API bool gen_StringAchievementsPair_read(gen_StringAchievementsPair *value,
 GEN__API bool gen_StringAchievementsPair_write(const gen_StringAchievementsPair *value, gen_Buffer *buffer, const gen_SchemaInfo *schema);
 GEN__API bool gen_Player_read(gen_Player *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema);
 GEN__API bool gen_Player_write(const gen_Player *value, gen_Buffer *buffer, const gen_SchemaInfo *schema);
+GEN__API bool gen_EventEnvelope_read(gen_EventEnvelope *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema);
+GEN__API bool gen_EventEnvelope_write(const gen_EventEnvelope *value, gen_Buffer *buffer, const gen_SchemaInfo *schema);
+GEN__API bool gen_EventPayload_read(gen_EventPayload *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema);
+GEN__API bool gen_EventPayload_write(const gen_EventPayload *value, gen_Buffer *buffer, const gen_SchemaInfo *schema);
 
 typedef enum gen_type {
     gen_type_u8,
@@ -182,6 +208,8 @@ typedef enum gen_type {
     gen_type_PlayerState,
     gen_type_StringAchievementsPair,
     gen_type_Player,
+    gen_type_EventEnvelope,
+    gen_type_EventPayload,
     gen_type_ArrayAchievements,
     gen_type_ArrayStringAchievementsPair,
 } gen_type;
@@ -232,6 +260,17 @@ typedef enum gen_playerParameters {
     gen_playerParameters_extraSeq2 = 6,
 } gen_playerParameters;
 
+typedef enum gen_eventEnvelopeParameters {
+    gen_eventEnvelopeParameters_id = 1,
+    gen_eventEnvelopeParameters_payload = 2,
+} gen_eventEnvelopeParameters;
+
+typedef enum gen_eventPayloadParameters {
+    gen_eventPayloadParameters_tag = 0,
+    gen_eventPayloadParameters_achievements = 1,
+    gen_eventPayloadParameters_state = 2,
+} gen_eventPayloadParameters;
+
 GEN__API const gen_TypeDescription *gen_get_type_description(gen_type type_id);
 GEN__API bool gen_Achievements_encode_compact(const gen_Achievements *value, gen_Buffer *buffer, const gen_SchemaInfo *schema);
 GEN__API bool gen_Achievements_decode_compact(gen_Achievements *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema);
@@ -249,6 +288,14 @@ GEN__API bool gen_Player_encode_compact(const gen_Player *value, gen_Buffer *buf
 GEN__API bool gen_Player_decode_compact(gen_Player *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema);
 GEN__API bool gen_Player_skip_compact(gen_Buffer *buffer);
 
+GEN__API bool gen_EventEnvelope_encode_compact(const gen_EventEnvelope *value, gen_Buffer *buffer, const gen_SchemaInfo *schema);
+GEN__API bool gen_EventEnvelope_decode_compact(gen_EventEnvelope *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema);
+GEN__API bool gen_EventEnvelope_skip_compact(gen_Buffer *buffer);
+
+GEN__API bool gen_EventPayload_encode_compact(const gen_EventPayload *value, gen_Buffer *buffer, const gen_SchemaInfo *schema);
+GEN__API bool gen_EventPayload_decode_compact(gen_EventPayload *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema);
+GEN__API bool gen_EventPayload_skip_compact(gen_Buffer *buffer);
+
 typedef struct gen_SchemaField {
     const char *name;
     uint32_t id;
@@ -263,8 +310,9 @@ typedef struct gen_SchemaField {
 
 typedef struct gen_SchemaType {
     const char *name;
-    uint8_t kind; // 0=ENUM, 1=STRUCT, 2=MESSAGE
+    uint8_t kind; // 0=ENUM, 1=STRUCT, 2=MESSAGE, 3=UNION
     uint32_t type_id;
+    uint32_t tag_type_id; // only for unions
     gen_SchemaField *fields;
     uint32_t field_count;
 } gen_SchemaType;
@@ -834,6 +882,42 @@ bool gen_StringAchievementsPairArray_write(const gen_StringAchievementsPairArray
     return true;
 }
 
+bool gen_EventPayload_read(gen_EventPayload *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema) {
+    (void)schema;
+    if (!memory) { return false; }
+    memset(value, 0, sizeof(*value));
+    uint16_t tag_raw = 0;
+    if (!gen_buffer_read_u16(buffer, &tag_raw)) { return false; }
+    value->tag = (gen_eventPayloadTag)tag_raw;
+    switch (value->tag) {
+        case gen_eventPayloadTag_achievements: {
+            if (!gen_Achievements_read(&value->value.achievements, buffer, memory, schema)) { return false; }
+            return true;
+        }
+        case gen_eventPayloadTag_state: {
+            if (!gen_PlayerState_read(&value->value.state, buffer, memory, schema)) { return false; }
+            return true;
+        }
+        default: return false;
+    }
+}
+
+bool gen_EventPayload_write(const gen_EventPayload *value, gen_Buffer *buffer, const gen_SchemaInfo *schema) {
+    (void)schema;
+    if (!gen_buffer_write_u16(buffer, (uint16_t)value->tag)) { return false; }
+    switch (value->tag) {
+        case gen_eventPayloadTag_achievements: {
+            if (!gen_Achievements_write(&value->value.achievements, buffer, schema)) { return false; }
+            return true;
+        }
+        case gen_eventPayloadTag_state: {
+            if (!gen_PlayerState_write(&value->value.state, buffer, schema)) { return false; }
+            return true;
+        }
+        default: return false;
+    }
+}
+
 bool gen_Achievements_read(gen_Achievements *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema) {
     if (!memory) { return false; }
     memset(value, 0, sizeof(*value));
@@ -1011,6 +1095,21 @@ bool gen_Player_write(const gen_Player *value, gen_Buffer *buffer, const gen_Sch
     return true;
 }
 
+bool gen_EventEnvelope_read(gen_EventEnvelope *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema) {
+    if (!memory) { return false; }
+    memset(value, 0, sizeof(*value));
+    if (!gen_buffer_read_u32(buffer, &value->id)) { return false; }
+    if (!gen_EventPayload_read(&value->payload, buffer, memory, schema)) { return false; }
+    return true;
+}
+
+bool gen_EventEnvelope_write(const gen_EventEnvelope *value, gen_Buffer *buffer, const gen_SchemaInfo *schema) {
+    (void)schema;
+    if (!gen_buffer_write_u32(buffer, value->id)) { return false; }
+    if (!gen_EventPayload_write(&value->payload, buffer, schema)) { return false; }
+    return true;
+}
+
 static const gen_ParameterInfo gen_Achievements_parameters[] = {
     { "questsCompleted", gen_achievementsParameters_questsCompleted, gen_type_u32, offsetof(gen_Achievements, questsCompleted) },
     { "bossesDefeated", gen_achievementsParameters_bossesDefeated, gen_type_u32, offsetof(gen_Achievements, bossesDefeated) },
@@ -1041,11 +1140,24 @@ static const gen_ParameterInfo gen_Player_parameters[] = {
     { "extraSeq2", gen_playerParameters_extraSeq2, gen_type_u32, offsetof(gen_Player, extraSeq2) },
 };
 
+static const gen_ParameterInfo gen_EventEnvelope_parameters[] = {
+    { "id", gen_eventEnvelopeParameters_id, gen_type_u32, offsetof(gen_EventEnvelope, id) },
+    { "payload", gen_eventEnvelopeParameters_payload, gen_type_EventPayload, offsetof(gen_EventEnvelope, payload) },
+};
+
+static const gen_ParameterInfo gen_EventPayload_parameters[] = {
+    { "tag", gen_eventPayloadParameters_tag, gen_type_u16, offsetof(gen_EventPayload, tag) },
+    { "achievements", gen_eventPayloadParameters_achievements, gen_type_Achievements, offsetof(gen_EventPayload, value.achievements) },
+    { "state", gen_eventPayloadParameters_state, gen_type_PlayerState, offsetof(gen_EventPayload, value.state) },
+};
+
 static const gen_TypeDescription gen_type_descriptions[] = {
     { "Achievements", gen_type_Achievements, sizeof(gen_Achievements), sizeof(gen_Achievements), gen_Achievements_parameters, 5 },
     { "PlayerState", gen_type_PlayerState, sizeof(gen_PlayerState), sizeof(gen_PlayerState), gen_PlayerState_parameters, 4 },
     { "StringAchievementsPair", gen_type_StringAchievementsPair, sizeof(gen_StringAchievementsPair), sizeof(gen_StringAchievementsPair), gen_StringAchievementsPair_parameters, 2 },
     { "Player", gen_type_Player, sizeof(gen_Player), sizeof(gen_Player), gen_Player_parameters, 7 },
+    { "EventEnvelope", gen_type_EventEnvelope, sizeof(gen_EventEnvelope), sizeof(gen_EventEnvelope), gen_EventEnvelope_parameters, 2 },
+    { "EventPayload", gen_type_EventPayload, sizeof(gen_EventPayload), sizeof(gen_EventPayload), gen_EventPayload_parameters, 3 },
 };
 
 const gen_TypeDescription *gen_get_type_description(gen_type type_id) {
@@ -1609,12 +1721,119 @@ bool gen_Player_skip_compact(gen_Buffer *buffer) {
     return true;
 }
 
+bool gen_EventEnvelope_encode_compact(const gen_EventEnvelope *value, gen_Buffer *buffer, const gen_SchemaInfo *schema) {
+    (void)schema;
+    if (true) {
+        if (!gen_write_wire_tag(buffer, gen_eventEnvelopeParameters_id, gen_wireType_Varint)) { return false; }
+        if (!gen_write_var_u32(buffer, (uint32_t)value->id)) { return false; }
+    }
+    if (true) {
+        if (!gen_write_wire_tag(buffer, gen_eventEnvelopeParameters_payload, gen_wireType_LengthDelimited)) { return false; }
+        uint32_t block_marker = 0;
+        if (!gen_buffer_begin_block(buffer, &block_marker)) { return false; }
+        if (!gen_EventPayload_encode_compact(&value->payload, buffer, schema)) { return false; }
+        if (!gen_buffer_end_block(buffer, block_marker)) { return false; }
+    }
+    if (!gen_write_var_u32(buffer, 0)) { return false; }
+    return true;
+}
+
+bool gen_EventEnvelope_decode_compact(gen_EventEnvelope *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema) {
+    if (!memory) { return false; }
+    memset(value, 0, sizeof(*value));
+    while (true) {
+        uint32_t field_id = 0;
+        gen_wireType wire = gen_wireType_Varint;
+        if (!gen_read_wire_tag(buffer, &field_id, &wire)) { return false; }
+        if (field_id == 0) { break; }
+        switch (field_id) {
+            case gen_eventEnvelopeParameters_id: {
+                {
+                    uint32_t tmp = 0;
+                    if (!gen_read_var_u32(buffer, &tmp)) { return false; }
+                    value->id = (uint32_t)tmp;
+                }
+                break;
+            }
+            case gen_eventEnvelopeParameters_payload: {
+                if (wire != gen_wireType_LengthDelimited) { return false; }
+                uint32_t block_end = 0;
+                if (!gen_buffer_begin_read_block(buffer, &block_end)) { return false; }
+                if (!gen_EventPayload_decode_compact(&value->payload, buffer, memory, schema)) { return false; }
+                if (!gen_buffer_end_read_block(buffer, block_end)) { return false; }
+                break;
+            }
+            default:
+                if (!gen_skip_wire_value(buffer, wire)) { return false; }
+                break;
+        }
+    }
+    return true;
+}
+
+bool gen_EventEnvelope_skip_compact(gen_Buffer *buffer) {
+    while (true) {
+        uint32_t field_id = 0;
+        gen_wireType wire = gen_wireType_Varint;
+        if (!gen_read_wire_tag(buffer, &field_id, &wire)) { return false; }
+        if (field_id == 0) { break; }
+        if (!gen_skip_wire_value(buffer, wire)) { return false; }
+    }
+    return true;
+}
+
+bool gen_EventPayload_encode_compact(const gen_EventPayload *value, gen_Buffer *buffer, const gen_SchemaInfo *schema) {
+    (void)schema;
+    if (!gen_write_var_u32(buffer, (uint32_t)value->tag)) { return false; }
+    switch (value->tag) {
+        case gen_eventPayloadTag_achievements: {
+            return gen_Achievements_encode_compact(&value->value.achievements, buffer, schema);
+        }
+        case gen_eventPayloadTag_state: {
+            return gen_PlayerState_encode_compact(&value->value.state, buffer, schema);
+        }
+        default: return false;
+    }
+}
+
+bool gen_EventPayload_decode_compact(gen_EventPayload *value, gen_Buffer *buffer, gen_Buffer *memory, const gen_SchemaInfo *schema) {
+    (void)schema;
+    if (!memory) { return false; }
+    memset(value, 0, sizeof(*value));
+    uint32_t tag = 0;
+    if (!gen_read_var_u32(buffer, &tag)) { return false; }
+    value->tag = (gen_eventPayloadTag)tag;
+    switch (value->tag) {
+        case gen_eventPayloadTag_achievements: {
+            return gen_Achievements_decode_compact(&value->value.achievements, buffer, memory, schema);
+        }
+        case gen_eventPayloadTag_state: {
+            return gen_PlayerState_decode_compact(&value->value.state, buffer, memory, schema);
+        }
+        default: return false;
+    }
+}
+
+bool gen_EventPayload_skip_compact(gen_Buffer *buffer) {
+    uint32_t tag = 0;
+    if (!gen_read_var_u32(buffer, &tag)) { return false; }
+    switch (tag) {
+        case gen_eventPayloadTag_achievements: {
+            return gen_Achievements_skip_compact(buffer);
+        }
+        case gen_eventPayloadTag_state: {
+            return gen_PlayerState_skip_compact(buffer);
+        }
+        default: return false;
+    }
+}
+
 #define gen_BINARY_MAGIC "BKIW"
-#define gen_BINARY_VERSION 3
+#define gen_BINARY_VERSION 4
 
 const uint8_t gen_schema_blob[] = {
 
-    0x42, 0x4b, 0x49, 0x57, 0x03, 0x06, 0x43, 0x6c, 0x61, 0x73, 0x73, 0x00, 0x00, 0x0c, 0x00, 0x50, 
+    0x42, 0x4b, 0x49, 0x57, 0x04, 0x08, 0x43, 0x6c, 0x61, 0x73, 0x73, 0x00, 0x00, 0x0c, 0x00, 0x50, 
     0x6c, 0x61, 0x79, 0x65, 0x72, 0x46, 0x6c, 0x61, 0x67, 0x73, 0x00, 0x00, 0x0d, 0x00, 0x41, 0x63, 
     0x68, 0x69, 0x65, 0x76, 0x65, 0x6d, 0x65, 0x6e, 0x74, 0x73, 0x00, 0x01, 0x0e, 0x05, 0x71, 0x75, 
     0x65, 0x73, 0x74, 0x73, 0x43, 0x6f, 0x6d, 0x70, 0x6c, 0x65, 0x74, 0x65, 0x64, 0x00, 0x00, 0x02, 
@@ -1634,7 +1853,12 @@ const uint8_t gen_schema_blob[] = {
     0x00, 0x04, 0x0e, 0x01, 0x00, 0x65, 0x78, 0x74, 0x72, 0x61, 0x53, 0x65, 0x71, 0x33, 0x00, 0x07, 
     0x02, 0x00, 0x00, 0x6d, 0x61, 0x70, 0x00, 0x08, 0x10, 0x01, 0x00, 0x65, 0x78, 0x74, 0x72, 0x61, 
     0x53, 0x65, 0x71, 0x32, 0x00, 0x06, 0x02, 0x04, 0x00, 0x65, 0x78, 0x74, 0x72, 0x61, 0x53, 0x65, 
-    0x71, 0x00, 0x05, 0x02, 0x08, 0x00, 
+    0x71, 0x00, 0x05, 0x02, 0x08, 0x00, 0x45, 0x76, 0x65, 0x6e, 0x74, 0x45, 0x6e, 0x76, 0x65, 0x6c, 
+    0x6f, 0x70, 0x65, 0x00, 0x02, 0x12, 0x02, 0x69, 0x64, 0x00, 0x01, 0x02, 0x00, 0x00, 0x70, 0x61, 
+    0x79, 0x6c, 0x6f, 0x61, 0x64, 0x00, 0x02, 0x13, 0x00, 0x00, 0x45, 0x76, 0x65, 0x6e, 0x74, 0x50, 
+    0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64, 0x00, 0x03, 0x13, 0x01, 0x02, 0x61, 0x63, 0x68, 0x69, 0x65, 
+    0x76, 0x65, 0x6d, 0x65, 0x6e, 0x74, 0x73, 0x00, 0x01, 0x0e, 0x00, 0x00, 0x73, 0x74, 0x61, 0x74, 
+    0x65, 0x00, 0x02, 0x0f, 0x00, 0x00, 
 };
 
 static const char *gen_read_strz(const uint8_t **cursor, const uint8_t *end) {
@@ -1663,7 +1887,7 @@ const gen_SchemaInfo *gen_parse_schema(const uint8_t *data, size_t size, gen_Buf
     if (size < 5 || memcmp(cursor, gen_BINARY_MAGIC, 4) != 0) return NULL;
     cursor += 4;
     uint8_t version = *cursor++;
-    if (version != gen_BINARY_VERSION && version != 2) return NULL;
+    if (version != gen_BINARY_VERSION && version != 2 && version != 3) return NULL;
     
     uint64_t count = gen_read_varuint(&cursor, end);
     gen_SchemaInfo *info = (gen_SchemaInfo *)gen_buffer_push_aligned(allocator, sizeof(gen_SchemaInfo), sizeof(void*));
@@ -1678,6 +1902,11 @@ const gen_SchemaInfo *gen_parse_schema(const uint8_t *data, size_t size, gen_Buf
         type->name = gen_read_strz(&cursor, end);
         type->kind = *cursor++;
         type->type_id = (uint32_t)gen_read_varuint(&cursor, end);
+        if (type->kind == 3 && version >= 4) {
+            type->tag_type_id = (uint32_t)gen_read_varuint(&cursor, end);
+        } else {
+            type->tag_type_id = 0;
+        }
         uint64_t fcount = gen_read_varuint(&cursor, end);
         type->field_count = (uint32_t)fcount;
         if (fcount > 0) {
@@ -1787,6 +2016,17 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
     
     if (type->kind == 0) { // ENUM
         uint32_t tmp; return gen_read_var_u32(buffer, &tmp);
+    }
+    
+    if (type->kind == 3) { // UNION
+        uint32_t tag = 0;
+        if (!gen_read_var_u32(buffer, &tag)) return false;
+        const gen_SchemaField *field = NULL;
+        for (uint32_t i = 0; i < type->field_count; ++i) {
+            if (type->fields[i].id == tag) { field = &type->fields[i]; break; }
+        }
+        if (!field) { return false; }
+        return gen_skip_generic(buffer, field->type_id, field->is_array, schema);
     }
     
     // STRUCT or MESSAGE

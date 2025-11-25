@@ -10,6 +10,7 @@
     - Two encoding modes:
       1. Standard: Tag-Length-Value format (similar to Protobuf but not compatible).
       2. Compact: Highly compact, schema-dependent format (No tags).
+    - Tagged unions: first-class `union Name : u16 { Type variant = 1; ... }` that emit discriminator enums + C unions with encode/decode/skip.
     - Automatic endianness handling (encodes to Little Endian).
 
   COMPARISON:
@@ -397,6 +398,22 @@ typedef struct {
     char *key_type;
 } FieldDef;
 
+typedef struct {
+    char *name;
+    char *type_name;
+    uint32_t field_id;
+    size_t line;
+} UnionField;
+
+typedef struct {
+    char *name;
+    char *base_type;
+    UnionField *fields;
+    size_t field_count;
+    size_t field_capacity;
+    size_t line;
+} UnionDef;
+
 // MARK: Compatibility helpers
 
 typedef struct {
@@ -414,6 +431,7 @@ typedef struct {
     char *name;
     uint8_t kind; // 0=ENUM, 1=STRUCT, 2=MESSAGE
     uint32_t type_id;
+    uint32_t union_base_type_id;
     CompatField *fields;
     uint32_t field_count;
 } CompatType;
@@ -453,6 +471,9 @@ typedef struct {
     StructDef *structs;
     size_t struct_count;
     size_t struct_capacity;
+    UnionDef *unions;
+    size_t union_count;
+    size_t union_capacity;
     ArrayType *arrays;
     size_t array_count;
     size_t array_capacity;
@@ -468,6 +489,7 @@ static const struct { const char *name; const char *ctype; } BUILTIN_ALIASES[] =
 };
 
 static void make_string_typename(char *dst, size_t dst_size, const Schema *schema);
+static bool union_base_supported(const char *name);
 
 static void schema_init(Schema *schema) {
     memset(schema, 0, sizeof(*schema));
@@ -615,7 +637,7 @@ static FieldDefault field_default_none(void) {
     return def;
 }
 
-static FieldDefault field_default_number(int64_t value) {
+static FieldDefault __attribute__((unused)) field_default_number(int64_t value) {
     FieldDefault def;
     def.kind = FIELD_DEFAULT_NUMBER;
     def.number_value = value;
@@ -623,7 +645,7 @@ static FieldDefault field_default_number(int64_t value) {
     return def;
 }
 
-static FieldDefault field_default_enum(const char *value) {
+static FieldDefault __attribute__((unused)) field_default_enum(const char *value) {
     FieldDefault def;
     def.kind = FIELD_DEFAULT_ENUM_VALUE;
     def.number_value = 0;
@@ -1015,6 +1037,83 @@ static void parse_struct(Parser *p, Schema *schema, StructKind kind) {
     schema->structs[schema->struct_count++] = def;
 }
 
+static void parse_union(Parser *p, Schema *schema) {
+    Token name_tok = parser_next(p);
+    if (name_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier after union keyword", p->lexer.filename, name_tok.line); }
+    char *name = token_to_string(&name_tok);
+    char *base_type = str_dup("u32");
+    if (parser_match(p, TOKEN_COLON)) {
+        Token base_tok = parser_next(p);
+        if (base_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected identifier for union tag base type", p->lexer.filename, base_tok.line); }
+        free(base_type);
+        base_type = token_to_string(&base_tok);
+    }
+    if (!union_base_supported(base_type)) {
+        fatal("%s:%zu: error: union base type must be one of u8/u16/u32/u64", p->lexer.filename, name_tok.line);
+    }
+    parser_expect(p, TOKEN_LBRACE, "expected '{' after union name");
+    UnionDef def = {0};
+    def.name = name;
+    def.base_type = base_type;
+    def.line = name_tok.line;
+
+    while (!parser_match(p, TOKEN_RBRACE)) {
+        Token type_tok = parser_next(p);
+        if (type_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected type identifier in union", p->lexer.filename, type_tok.line); }
+        Token field_tok = parser_next(p);
+        if (field_tok.kind != TOKEN_IDENTIFIER) { fatal("%s:%zu: error: expected variant name in union", p->lexer.filename, field_tok.line); }
+        if (parser_match(p, TOKEN_QUESTION)) {
+            fatal("%s:%zu: error: union variants cannot be optional", p->lexer.filename, field_tok.line);
+        }
+        if (parser_match(p, TOKEN_LBRACKET)) {
+            fatal("%s:%zu: error: union variants cannot be arrays", p->lexer.filename, field_tok.line);
+        }
+        if (!parser_match(p, TOKEN_ASSIGN)) {
+            fatal("%s:%zu: error: expected '=' with numeric tag id for union variant '%.*s'", p->lexer.filename, field_tok.line, (int)(field_tok.end - field_tok.start), field_tok.start);
+        }
+        Token id_tok = parser_next(p);
+        if (id_tok.kind != TOKEN_NUMBER) {
+            fatal("%s:%zu: error: expected numeric tag id for union variant '%.*s'", p->lexer.filename, id_tok.line, (int)(field_tok.end - field_tok.start), field_tok.start);
+        }
+        uint64_t raw_id = token_to_uint64(&id_tok);
+        if (raw_id == 0 || raw_id > UINT32_MAX) {
+            fatal("%s:%zu: error: union tag ids must be in 1..UINT32_MAX (got %llu)", p->lexer.filename, id_tok.line, (unsigned long long)raw_id);
+        }
+        parser_expect(p, TOKEN_SEMICOLON, "expected ';' after union variant");
+
+        UnionField variant = {0};
+        variant.name = token_to_string(&field_tok);
+        variant.type_name = token_to_string(&type_tok);
+        variant.field_id = (uint32_t)raw_id;
+        variant.line = type_tok.line;
+
+        for (size_t i = 0; i < def.field_count; ++i) {
+            if (strcmp(def.fields[i].name, variant.name) == 0) {
+                fatal("%s:%zu: error: duplicate union variant name '%s' (previous at line %zu)", p->lexer.filename, field_tok.line, variant.name, def.fields[i].line);
+            }
+            if (def.fields[i].field_id == variant.field_id) {
+                fatal("%s:%zu: error: duplicate union tag id %u (conflicts with '%s' at line %zu)", p->lexer.filename, id_tok.line, variant.field_id, def.fields[i].name, def.fields[i].line);
+            }
+        }
+
+        if (def.field_count == def.field_capacity) {
+            size_t new_cap = ARRAY_GROW_CAP(def.field_capacity);
+            def.fields = (UnionField *)realloc(def.fields, new_cap * sizeof(UnionField));
+            if (!def.fields) { fatal("schema_gen: out of memory while growing union variants"); }
+            def.field_capacity = new_cap;
+        }
+        def.fields[def.field_count++] = variant;
+    }
+
+    if (schema->union_count == schema->union_capacity) {
+        size_t new_cap = ARRAY_GROW_CAP(schema->union_capacity);
+        schema->unions = (UnionDef *)realloc(schema->unions, new_cap * sizeof(UnionDef));
+        if (!schema->unions) { fatal("schema_gen: out of memory while growing unions"); }
+        schema->union_capacity = new_cap;
+    }
+    schema->unions[schema->union_count++] = def;
+}
+
 static void parse_schema(Parser *p, Schema *schema) {
     while (true) {
         Token tok = parser_peek(p);
@@ -1053,6 +1152,11 @@ static void parse_schema(Parser *p, Schema *schema) {
             parse_struct(p, schema, STRUCT_KIND_MESSAGE);
             continue;
         }
+        if (token_equals(&tok, "union")) {
+            parser_next(p);
+            parse_union(p, schema);
+            continue;
+        }
         fatal("%s:%zu: error: unsupported top-level token", p->lexer.filename, tok.line);
     }
 }
@@ -1071,8 +1175,17 @@ static const StructDef *find_struct_const(const Schema *schema, const char *name
     return NULL;
 }
 
+static const UnionDef *find_union_const(const Schema *schema, const char *name) {
+    for (size_t i = 0; i < schema->union_count; ++i) {
+        if (strcmp(schema->unions[i].name, name) == 0) { return &schema->unions[i]; }
+    }
+    return NULL;
+}
+
 static bool type_is_struct_type(const Schema *schema, const char *name) {
-    return find_struct_const(schema, name) != NULL;
+    if (find_struct_const(schema, name)) { return true; }
+    if (find_union_const(schema, name)) { return true; }
+    return false;
 }
 
 static const TypeAlias *find_alias_const(const Schema *schema, const char *name) {
@@ -1100,10 +1213,16 @@ static void make_enum_value_name(char *dst, size_t dst_size, const Schema *schem
     snprintf(dst, dst_size, "%s%s_%s", schema->prefix, enum_name, value);
 }
 
-static void make_parameter_enum_name(char *dst, size_t dst_size, const Schema *schema, const StructDef *def) {
+static void __attribute__((unused)) make_parameter_enum_name(char *dst, size_t dst_size, const Schema *schema, const StructDef *def) {
     char lower[256];
     to_lower_first(lower, sizeof(lower), def->name);
     snprintf(dst, dst_size, "%s%sParameters", schema->prefix, lower);
+}
+
+static void make_union_tag_enum_name(char *dst, size_t dst_size, const Schema *schema, const UnionDef *def) {
+    char lower[256];
+    to_lower_first(lower, sizeof(lower), def->name);
+    snprintf(dst, dst_size, "%s%sTag", schema->prefix, lower);
 }
 
 static bool type_is_bool(const char *name) { return strcmp(name, "bool") == 0; }
@@ -1120,6 +1239,10 @@ static bool type_is_f32(const char *name) { return strcmp(name, "f32") == 0; }
 static bool type_is_f64(const char *name) { return strcmp(name, "f64") == 0; }
 static bool type_is_string(const char *name) { return strcmp(name, "string") == 0; }
 
+static bool union_base_supported(const char *name) {
+    return strcmp(name, "u8") == 0 || strcmp(name, "u16") == 0 || strcmp(name, "u32") == 0 || strcmp(name, "u64") == 0;
+}
+
 static const char *c_type_for(const Schema *schema, const char *type_name, char *buffer, size_t buffer_size, size_t line) {
     const TypeAlias *alias = find_alias_const(schema, type_name);
     if (alias) { return alias->c_type; }
@@ -1127,6 +1250,8 @@ static const char *c_type_for(const Schema *schema, const char *type_name, char 
     if (en) { make_prefixed(buffer, buffer_size, schema, en->name); return buffer; }
     const StructDef *st = find_struct_const(schema, type_name);
     if (st) { make_prefixed(buffer, buffer_size, schema, st->name); return buffer; }
+    const UnionDef *un = find_union_const(schema, type_name);
+    if (un) { make_prefixed(buffer, buffer_size, schema, un->name); return buffer; }
     fatal("%s:%zu: error: unknown type '%s'", schema->filename, line, type_name);
     return NULL;
 }
@@ -1305,7 +1430,7 @@ static void append_scalar_decode(StringBuilder *out, const Schema *schema, const
     }
 }
 
-static void wire_kind_literal(char *dst, size_t dst_size, const Schema *schema, const FieldDef *field) {
+static void __attribute__((unused)) wire_kind_literal(char *dst, size_t dst_size, const Schema *schema, const FieldDef *field) {
     if (field->is_array || type_is_struct_type(schema, field->type_name) ||
         type_is_f32(field_base_type(schema, field)) || type_is_f64(field_base_type(schema, field))) {
         snprintf(dst, dst_size, "%swireType_LengthDelimited", schema->prefix);
@@ -1314,7 +1439,7 @@ static void wire_kind_literal(char *dst, size_t dst_size, const Schema *schema, 
     }
 }
 
-static bool field_uses_length_wire(const Schema *schema, const FieldDef *field) {
+static bool __attribute__((unused)) field_uses_length_wire(const Schema *schema, const FieldDef *field) {
     if (field->is_array || type_is_struct_type(schema, field->type_name)) { return true; }
     const char *base = field_base_type(schema, field);
     return type_is_f32(base) || type_is_f64(base);
@@ -1865,6 +1990,103 @@ static void append_message_codec(StringBuilder *decls, StringBuilder *impl, cons
         "}\n\n",
         schema->prefix, schema->prefix, schema->prefix, schema->prefix);
 }
+
+static void append_union_codec(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const UnionDef *def, const char *api_macro) {
+    char buffer_type[256];
+    snprintf(buffer_type, sizeof(buffer_type), "%sBuffer", schema->prefix);
+    char union_name[256];
+    make_prefixed(union_name, sizeof(union_name), schema, def->name);
+    char tag_enum[256];
+    make_union_tag_enum_name(tag_enum, sizeof(tag_enum), schema, def);
+
+    sb_append(decls, "%s bool %s_encode_compact(const %s *value, %s *buffer, const %sSchemaInfo *schema);\n", api_macro, union_name, union_name, buffer_type, schema->prefix);
+    sb_append(decls, "%s bool %s_decode_compact(%s *value, %s *buffer, %s *memory, const %sSchemaInfo *schema);\n", api_macro, union_name, union_name, buffer_type, buffer_type, schema->prefix);
+    sb_append(decls, "%s bool %s_skip_compact(%s *buffer);\n\n", api_macro, union_name, buffer_type);
+
+    sb_append(impl, "bool %s_encode_compact(const %s *value, %s *buffer, const %sSchemaInfo *schema) {\n", union_name, union_name, buffer_type, schema->prefix);
+    sb_append(impl, "    (void)schema;\n");
+    sb_append(impl, "    if (!%swrite_var_u32(buffer, (uint32_t)value->tag)) { return false; }\n", schema->prefix);
+    sb_append(impl, "    switch (value->tag) {\n");
+    for (size_t i = 0; i < def->field_count; ++i) {
+        const UnionField *field = &def->fields[i];
+        sb_append(impl, "        case %s_%s: {\n", tag_enum, field->name);
+        if (type_is_struct_type(schema, field->type_name)) {
+            char nested[256];
+            make_prefixed(nested, sizeof(nested), schema, field->type_name);
+            sb_append(impl, "            return %s_encode_compact(&value->value.%s, buffer, schema);\n", nested, field->name);
+        } else {
+            FieldDef tmp = {0};
+            tmp.type_name = field->type_name;
+            tmp.line = field->line;
+            tmp.bit_width = 0;
+            char value_expr[256];
+            snprintf(value_expr, sizeof(value_expr), "value->value.%s", field->name);
+            append_scalar_encode(impl, schema, &tmp, value_expr, "            ");
+            sb_append(impl, "            return true;\n");
+        }
+        sb_append(impl, "        }\n");
+    }
+    sb_append(impl, "        default: return false;\n    }\n}\n\n");
+
+    sb_append(impl, "bool %s_decode_compact(%s *value, %s *buffer, %s *memory, const %sSchemaInfo *schema) {\n", union_name, union_name, buffer_type, buffer_type, schema->prefix);
+    sb_append(impl, "    (void)schema;\n    if (!memory) { return false; }\n    memset(value, 0, sizeof(*value));\n");
+    sb_append(impl, "    uint32_t tag = 0;\n    if (!%sread_var_u32(buffer, &tag)) { return false; }\n", schema->prefix);
+    sb_append(impl, "    value->tag = (%s)tag;\n", tag_enum);
+    sb_append(impl, "    switch (value->tag) {\n");
+    for (size_t i = 0; i < def->field_count; ++i) {
+        const UnionField *field = &def->fields[i];
+        sb_append(impl, "        case %s_%s: {\n", tag_enum, field->name);
+        if (type_is_struct_type(schema, field->type_name)) {
+            char nested[256];
+            make_prefixed(nested, sizeof(nested), schema, field->type_name);
+            sb_append(impl, "            return %s_decode_compact(&value->value.%s, buffer, memory, schema);\n", nested, field->name);
+        } else {
+            FieldDef tmp = {0};
+            tmp.type_name = field->type_name;
+            tmp.line = field->line;
+            tmp.bit_width = 0;
+            char target[256];
+            snprintf(target, sizeof(target), "value->value.%s", field->name);
+            append_scalar_decode(impl, schema, &tmp, target, "            ", "return false;");
+            sb_append(impl, "            return true;\n");
+        }
+        sb_append(impl, "        }\n");
+    }
+    sb_append(impl, "        default: return false;\n    }\n}\n\n");
+
+    sb_append(impl, "bool %s_skip_compact(%s *buffer) {\n", union_name, buffer_type);
+    sb_append(impl, "    uint32_t tag = 0;\n    if (!%sread_var_u32(buffer, &tag)) { return false; }\n", schema->prefix);
+    sb_append(impl, "    switch (tag) {\n");
+    for (size_t i = 0; i < def->field_count; ++i) {
+        const UnionField *field = &def->fields[i];
+        sb_append(impl, "        case %s_%s: {\n", tag_enum, field->name);
+        FieldDef tmp = {0};
+        tmp.type_name = field->type_name;
+        tmp.line = field->line;
+        const char *base = field_base_type(schema, &tmp);
+        if (type_is_struct_type(schema, field->type_name)) {
+            char nested[256];
+            make_prefixed(nested, sizeof(nested), schema, field->type_name);
+            sb_append(impl, "            return %s_skip_compact(buffer);\n", nested);
+        } else if (type_is_string(field->type_name)) {
+            sb_append(impl, "            uint32_t len = 0;\n            if (!%sread_var_u32(buffer, &len)) { return false; }\n            return %sbuffer_skip_bytes(buffer, len);\n", schema->prefix, schema->prefix);
+        } else if (type_is_f32(base)) {
+            sb_append(impl, "            float tmp = 0.0f; return %sread_compact_f32(buffer, &tmp);\n", schema->prefix);
+        } else if (type_is_f64(base)) {
+            sb_append(impl, "            double tmp = 0.0; return %sread_compact_f64(buffer, &tmp);\n", schema->prefix);
+        } else if (type_is_u64(base)) {
+            sb_append(impl, "            uint64_t tmp = 0; return %sread_var_u64(buffer, &tmp);\n", schema->prefix);
+        } else if (type_is_u32_compatible(base) || type_is_bool(base) || type_is_u8(base)) {
+            sb_append(impl, "            uint32_t tmp = 0; return %sread_var_u32(buffer, &tmp);\n", schema->prefix);
+        } else if (type_is_signed64(base)) {
+            sb_append(impl, "            int64_t tmp = 0; return %sread_var_s64(buffer, &tmp);\n", schema->prefix);
+        } else {
+            sb_append(impl, "            int32_t tmp = 0; return %sread_var_s32(buffer, &tmp);\n", schema->prefix);
+        }
+        sb_append(impl, "        }\n");
+    }
+    sb_append(impl, "        default: return false;\n    }\n}\n\n");
+}
 static void append_compact_codecs(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
     for (size_t i = 0; i < schema->struct_count; ++i) {
         const StructDef *def = &schema->structs[i];
@@ -1877,6 +2099,9 @@ static void append_compact_codecs(StringBuilder *decls, StringBuilder *impl, con
         if (def->kind == STRUCT_KIND_MESSAGE) {
             append_message_codec(decls, impl, schema, def, api_macro);
         }
+    }
+    for (size_t i = 0; i < schema->union_count; ++i) {
+        append_union_codec(decls, impl, schema, &schema->unions[i], api_macro);
     }
 }
 
@@ -1961,6 +2186,8 @@ static void append_memory_buffer(StringBuilder *decls, StringBuilder *impl, cons
 }
 
 static void append_buffer_helpers(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
+    (void)decls;
+    (void)api_macro;
     // Pointer aliases (e.g., string/char*) need custom handling; skip them here.
     // 'string' is emitted via append_string_helpers below.
     for (size_t i = 0; i < schema->alias_count; ++i) {
@@ -2021,6 +2248,8 @@ static void append_buffer_helpers(StringBuilder *decls, StringBuilder *impl, con
 }
 
 static void append_string_helpers(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
+    (void)decls;
+    (void)api_macro;
     const TypeAlias *alias = find_alias_const(schema, "string");
     if (!alias) { return; }
     char str_type[256];
@@ -2055,6 +2284,8 @@ static void append_string_helpers(StringBuilder *decls, StringBuilder *impl, con
 }
 
 static void append_wire_helpers(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
+    (void)decls;
+    (void)api_macro;
     sb_append(decls,
         "typedef enum %swireType {\n"
         "    %swireType_Varint = 0,\n"
@@ -2204,6 +2435,8 @@ static void append_wire_helpers(StringBuilder *decls, StringBuilder *impl, const
 }
 
 static void append_compact_helpers(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
+    (void)decls;
+    (void)api_macro;
     const char *p = schema->prefix;
     
     sb_append(impl,
@@ -2487,6 +2720,11 @@ static void append_struct_forward(StringBuilder *out, const Schema *schema) {
         make_prefixed(struct_name, sizeof(struct_name), schema, schema->structs[i].name);
         sb_append(out, "typedef struct %s %s;\n", struct_name, struct_name);
     }
+    for (size_t i = 0; i < schema->union_count; ++i) {
+        char union_name[256];
+        make_prefixed(union_name, sizeof(union_name), schema, schema->unions[i].name);
+        sb_append(out, "typedef struct %s %s;\n", union_name, union_name);
+    }
     sb_append(out, "\n");
 }
 
@@ -2506,13 +2744,14 @@ static void append_array_defs(StringBuilder *out, const Schema *schema) {
     }
 }
 
-static void append_struct_defs(StringBuilder *out, const Schema *schema) {
+static void append_struct_defs(StringBuilder *out, const Schema *schema, int kind_filter) {
     char deprecated_macro[256];
     to_upper_str(deprecated_macro, sizeof(deprecated_macro), schema->prefix);
     strncat(deprecated_macro, "DEPRECATED", sizeof(deprecated_macro) - strlen(deprecated_macro) - 1);
 
     for (size_t i = 0; i < schema->struct_count; ++i) {
         const StructDef *def = &schema->structs[i];
+        if (kind_filter != -1 && def->kind != (StructKind)kind_filter) { continue; }
         char struct_name[256];
         make_prefixed(struct_name, sizeof(struct_name), schema, def->name);
         sb_append(out, "struct %s {\n", struct_name);
@@ -2544,6 +2783,32 @@ static void append_struct_defs(StringBuilder *out, const Schema *schema) {
     }
 }
 
+static void append_union_defs(StringBuilder *out, const Schema *schema) {
+    for (size_t i = 0; i < schema->union_count; ++i) {
+        const UnionDef *def = &schema->unions[i];
+        char tag_enum[256];
+        make_union_tag_enum_name(tag_enum, sizeof(tag_enum), schema, def);
+        sb_append(out, "typedef enum %s {\n", tag_enum);
+        for (size_t j = 0; j < def->field_count; ++j) {
+            sb_append(out, "    %s_%s = %u,\n", tag_enum, def->fields[j].name, def->fields[j].field_id);
+        }
+        sb_append(out, "} %s;\n\n", tag_enum);
+
+        char union_name[256];
+        make_prefixed(union_name, sizeof(union_name), schema, def->name);
+        sb_append(out, "struct %s {\n", union_name);
+        sb_append(out, "    %s tag;\n", tag_enum);
+        sb_append(out, "    union {\n");
+        for (size_t j = 0; j < def->field_count; ++j) {
+            char cbuf[256];
+            const char *ctype = c_type_for(schema, def->fields[j].type_name, cbuf, sizeof(cbuf), def->fields[j].line);
+            sb_append(out, "        %s %s;\n", ctype, def->fields[j].name);
+        }
+        sb_append(out, "    } value;\n");
+        sb_append(out, "};\n\n");
+    }
+}
+
 static void append_io_forward_decls(StringBuilder *out, const Schema *schema, const char *api_macro) {
     for (size_t i = 0; i < schema->array_count; ++i) {
         const char *element = schema->arrays[i].element_type;
@@ -2563,12 +2828,22 @@ static void append_io_forward_decls(StringBuilder *out, const Schema *schema, co
         sb_append(out, "%s bool %s_write(const %s *value, %sBuffer *buffer, const %sSchemaInfo *schema);\n",
             api_macro, struct_name, struct_name, schema->prefix, schema->prefix);
     }
+    for (size_t i = 0; i < schema->union_count; ++i) {
+        char union_name[256];
+        make_prefixed(union_name, sizeof(union_name), schema, schema->unions[i].name);
+        sb_append(out, "%s bool %s_read(%s *value, %sBuffer *buffer, %sBuffer *memory, const %sSchemaInfo *schema);\n",
+            api_macro, union_name, union_name, schema->prefix, schema->prefix, schema->prefix);
+        sb_append(out, "%s bool %s_write(const %s *value, %sBuffer *buffer, const %sSchemaInfo *schema);\n",
+            api_macro, union_name, union_name, schema->prefix, schema->prefix);
+    }
     if (schema->array_count || schema->struct_count) {
         sb_append(out, "\n");
     }
 }
 
 static void append_array_io(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
+    (void)decls;
+    (void)api_macro;
     for (size_t i = 0; i < schema->array_count; ++i) {
         const char *element = schema->arrays[i].element_type;
         char array_name[256];
@@ -2650,9 +2925,81 @@ static void append_array_io(StringBuilder *decls, StringBuilder *impl, const Sch
             "    return true;\n"
             "}\n\n");
     }
+
+    for (size_t i = 0; i < schema->union_count; ++i) {
+        const UnionDef *def = &schema->unions[i];
+        char union_name[256];
+        make_prefixed(union_name, sizeof(union_name), schema, def->name);
+        char tag_enum[256];
+        make_union_tag_enum_name(tag_enum, sizeof(tag_enum), schema, def);
+        char base_buf[256];
+        const char *base_type = c_type_for(schema, def->base_type, base_buf, sizeof(base_buf), def->line);
+
+        sb_append(impl, "bool %s_read(%s *value, %sBuffer *buffer, %sBuffer *memory, const %sSchemaInfo *schema) {\n", union_name, union_name, schema->prefix, schema->prefix, schema->prefix);
+        sb_append(impl, "    (void)schema;\n    if (!memory) { return false; }\n    memset(value, 0, sizeof(*value));\n");
+        sb_append(impl, "    %s tag_raw = 0;\n", base_type);
+        sb_append(impl, "    if (!%sbuffer_read_%s(buffer, &tag_raw)) { return false; }\n", schema->prefix, def->base_type);
+        sb_append(impl, "    value->tag = (%s)tag_raw;\n", tag_enum);
+        sb_append(impl, "    switch (value->tag) {\n");
+        for (size_t j = 0; j < def->field_count; ++j) {
+            const UnionField *field = &def->fields[j];
+            sb_append(impl, "        case %s_%s: {\n", tag_enum, field->name);
+            if (type_is_enum(schema, field->type_name)) {
+                const EnumDef *en = find_enum_const(schema, field->type_name);
+                char enum_base_buf[256];
+                const char *enum_base = c_type_for(schema, en->base_type, enum_base_buf, sizeof(enum_base_buf), en->line);
+                sb_append(impl, "            %s raw = 0;\n", enum_base);
+                sb_append(impl, "            if (!%sbuffer_read_%s(buffer, &raw)) { return false; }\n", schema->prefix, en->base_type);
+                sb_append(impl, "            value->value.%s = (%s)raw;\n", field->name, enum_base);
+            } else if (is_scalar_type(schema, field->type_name)) {
+                if (type_is_string(field->type_name)) {
+                    sb_append(impl, "            if (!%sbuffer_read_string(buffer, memory, &value->value.%s)) { return false; }\n", schema->prefix, field->name);
+                } else {
+                    sb_append(impl, "            if (!%sbuffer_read_%s(buffer, &value->value.%s)) { return false; }\n", schema->prefix, field->type_name, field->name);
+                }
+            } else {
+                char nested[256];
+                make_prefixed(nested, sizeof(nested), schema, field->type_name);
+                sb_append(impl, "            if (!%s_read(&value->value.%s, buffer, memory, schema)) { return false; }\n", nested, field->name);
+            }
+            sb_append(impl, "            return true;\n        }\n");
+        }
+        sb_append(impl, "        default: return false;\n    }\n");
+        sb_append(impl, "}\n\n");
+
+        sb_append(impl, "bool %s_write(const %s *value, %sBuffer *buffer, const %sSchemaInfo *schema) {\n", union_name, union_name, schema->prefix, schema->prefix);
+        sb_append(impl, "    (void)schema;\n");
+        sb_append(impl, "    if (!%sbuffer_write_%s(buffer, (%s)value->tag)) { return false; }\n", schema->prefix, def->base_type, base_type);
+        sb_append(impl, "    switch (value->tag) {\n");
+        for (size_t j = 0; j < def->field_count; ++j) {
+            const UnionField *field = &def->fields[j];
+            sb_append(impl, "        case %s_%s: {\n", tag_enum, field->name);
+            if (type_is_enum(schema, field->type_name)) {
+                const EnumDef *en = find_enum_const(schema, field->type_name);
+                char enum_base_buf[256];
+                const char *enum_base = c_type_for(schema, en->base_type, enum_base_buf, sizeof(enum_base_buf), en->line);
+                sb_append(impl, "            if (!%sbuffer_write_%s(buffer, (%s)value->value.%s)) { return false; }\n", schema->prefix, en->base_type, enum_base, field->name);
+            } else if (is_scalar_type(schema, field->type_name)) {
+                if (type_is_string(field->type_name)) {
+                    sb_append(impl, "            if (!%sbuffer_write_string(buffer, &value->value.%s)) { return false; }\n", schema->prefix, field->name);
+                } else {
+                    sb_append(impl, "            if (!%sbuffer_write_%s(buffer, value->value.%s)) { return false; }\n", schema->prefix, field->type_name, field->name);
+                }
+            } else {
+                char nested[256];
+                make_prefixed(nested, sizeof(nested), schema, field->type_name);
+                sb_append(impl, "            if (!%s_write(&value->value.%s, buffer, schema)) { return false; }\n", nested, field->name);
+            }
+            sb_append(impl, "            return true;\n        }\n");
+        }
+        sb_append(impl, "        default: return false;\n    }\n");
+        sb_append(impl, "}\n\n");
+    }
 }
 
 static void append_struct_io(StringBuilder *decls, StringBuilder *impl, const Schema *schema, const char *api_macro) {
+    (void)decls;
+    (void)api_macro;
     for (size_t i = 0; i < schema->struct_count; ++i) {
         const StructDef *def = &schema->structs[i];
         char struct_name[256];
@@ -2843,6 +3190,9 @@ static void append_metadata(StringBuilder *decls, StringBuilder *impl, const Sch
     for (size_t i = 0; i < schema->struct_count; ++i) {
         sb_append(decls, "    %s_%s,\n", type_id_name, schema->structs[i].name);
     }
+    for (size_t i = 0; i < schema->union_count; ++i) {
+        sb_append(decls, "    %s_%s,\n", type_id_name, schema->unions[i].name);
+    }
     for (size_t i = 0; i < schema->array_count; ++i) {
         sb_append(decls, "    %s_Array%s,\n", type_id_name, schema->arrays[i].element_type);
     }
@@ -2911,6 +3261,40 @@ static void append_metadata(StringBuilder *decls, StringBuilder *impl, const Sch
         sb_append(impl, "};\n\n");
     }
 
+    for (size_t i = 0; i < schema->union_count; ++i) {
+        const UnionDef *def = &schema->unions[i];
+        char lower[256];
+        to_lower_first(lower, sizeof(lower), def->name);
+        char enum_name[256];
+        snprintf(enum_name, sizeof(enum_name), "%s%sParameters", schema->prefix, lower);
+        sb_append(decls, "typedef enum %s {\n", enum_name);
+        sb_append(decls, "    %s_tag = 0,\n", enum_name);
+        for (size_t j = 0; j < def->field_count; ++j) {
+            sb_append(decls, "    %s_%s = %u,\n", enum_name, def->fields[j].name, def->fields[j].field_id);
+        }
+        sb_append(decls, "} %s;\n\n", enum_name);
+
+        char param_array[256];
+        snprintf(param_array, sizeof(param_array), "%s%s_parameters", schema->prefix, def->name);
+        sb_append(impl, "static const %s %s[] = {\n", param_info, param_array);
+        char type_id_buf[256];
+        snprintf(type_id_buf, sizeof(type_id_buf), "%s_%s", type_id_name, def->base_type);
+        char union_name[256];
+        make_prefixed(union_name, sizeof(union_name), schema, def->name);
+        sb_append(impl, "    { \"tag\", %s_tag, %s, offsetof(%s, tag) },\n", enum_name, type_id_buf, union_name);
+        for (size_t j = 0; j < def->field_count; ++j) {
+            const UnionField *field = &def->fields[j];
+            char field_type_buf[256];
+            snprintf(field_type_buf, sizeof(field_type_buf), "%s_%s", type_id_name, field->type_name);
+            if (!find_alias_const(schema, field->type_name) && !find_enum_const(schema, field->type_name) && !find_struct_const(schema, field->type_name) && !find_union_const(schema, field->type_name)) {
+                snprintf(field_type_buf, sizeof(field_type_buf), "%s_%s", type_id_name, field->type_name);
+            }
+            sb_append(impl, "    { \"%s\", %s_%s, %s, offsetof(%s, value.%s) },\n",
+                field->name, enum_name, field->name, field_type_buf, union_name, field->name);
+        }
+        sb_append(impl, "};\n\n");
+    }
+
     sb_append(impl, "static const %s %stype_descriptions[] = {\n", type_desc, schema->prefix);
     for (size_t i = 0; i < schema->struct_count; ++i) {
         const StructDef *def = &schema->structs[i];
@@ -2920,6 +3304,16 @@ static void append_metadata(StringBuilder *decls, StringBuilder *impl, const Sch
         snprintf(param_array, sizeof(param_array), "%s%s_parameters", schema->prefix, def->name);
         sb_append(impl, "    { \"%s\", %s_%s, sizeof(%s), sizeof(%s), %s, %zu },\n",
             def->name, type_id_name, def->name, struct_name, struct_name, param_array, def->field_count);
+    }
+    for (size_t i = 0; i < schema->union_count; ++i) {
+        const UnionDef *def = &schema->unions[i];
+        char union_name[256];
+        make_prefixed(union_name, sizeof(union_name), schema, def->name);
+        char param_array[256];
+        snprintf(param_array, sizeof(param_array), "%s%s_parameters", schema->prefix, def->name);
+        size_t param_count = def->field_count + 1; // tag + variants
+        sb_append(impl, "    { \"%s\", %s_%s, sizeof(%s), sizeof(%s), %s, %zu },\n",
+            def->name, type_id_name, def->name, union_name, union_name, param_array, param_count);
     }
     sb_append(impl, "};\n\n");
 
@@ -3009,7 +3403,9 @@ static void generate_header(const Schema *schema, const char *input_path, const 
     append_array_forward(&out, schema);
     append_enum_defs(&out, schema);
     append_array_defs(&out, schema);
-    append_struct_defs(&out, schema);
+    append_struct_defs(&out, schema, STRUCT_KIND_STRUCT);
+    append_union_defs(&out, schema);
+    append_struct_defs(&out, schema, STRUCT_KIND_MESSAGE);
     append_io_forward_decls(&out, schema, api_macro);
     append_array_io(&out, &impl, schema, api_macro);
     append_struct_io(&out, &impl, schema, api_macro);
@@ -3036,7 +3432,7 @@ static void generate_header(const Schema *schema, const char *input_path, const 
 // MARK: Binary schema generation
 
 #define BINARY_MAGIC "BKIW"
-#define BINARY_VERSION 3
+#define BINARY_VERSION 4
 
 static void sb_write_u8(StringBuilder *sb, uint8_t v) {
     sb_append_bytes(sb, (char *)&v, 1);
@@ -3070,6 +3466,10 @@ static uint32_t get_type_id(const Schema *schema, const char *name) {
     for (size_t i = 0; i < schema->struct_count; ++i) {
         if (strcmp(schema->structs[i].name, name) == 0) { return (uint32_t)(schema->alias_count + schema->enum_count + i); }
     }
+    // 4. Unions
+    for (size_t i = 0; i < schema->union_count; ++i) {
+        if (strcmp(schema->unions[i].name, name) == 0) { return (uint32_t)(schema->alias_count + schema->enum_count + schema->struct_count + i); }
+    }
     
     // Check if it's an array type name
     for (size_t i = 0; i < schema->array_count; ++i) {
@@ -3090,7 +3490,7 @@ static void generate_binary_schema_data(const Schema *schema, StringBuilder *sb)
     sb_write_u8(sb, BINARY_VERSION);
 
     // Calculate total types explicitly emitted
-    uint32_t type_count = (uint32_t)(schema->enum_count + schema->struct_count);
+    uint32_t type_count = (uint32_t)(schema->enum_count + schema->struct_count + schema->union_count);
     sb_write_varuint(sb, type_count);
 
     // Type Definitions
@@ -3134,6 +3534,24 @@ static void generate_binary_schema_data(const Schema *schema, StringBuilder *sb)
             uint8_t flags = 8; // removed/reserved marker
             sb_write_u8(sb, flags);
             sb_write_varuint(sb, field->bit_width);
+        }
+    }
+
+    // 3. Unions
+    for (size_t i = 0; i < schema->union_count; ++i) {
+        const UnionDef *def = &schema->unions[i];
+        sb_write_strz(sb, def->name);
+        sb_write_u8(sb, 3); // 3=UNION
+        sb_write_varuint(sb, get_type_id(schema, def->name));
+        sb_write_varuint(sb, get_type_id(schema, def->base_type)); // tag base type id
+        sb_write_varuint(sb, def->field_count);
+        for (size_t j = 0; j < def->field_count; ++j) {
+            const UnionField *field = &def->fields[j];
+            sb_write_strz(sb, field->name);
+            sb_write_varuint(sb, field->field_id);
+            sb_write_varuint(sb, get_type_id(schema, field->type_name));
+            sb_write_u8(sb, 0); // flags
+            sb_write_varuint(sb, 0); // bit_width
         }
     }
 }
@@ -3180,7 +3598,7 @@ static void compat_parse_binary_schema(const char *path, size_t builtin_alias_co
     }
     cursor += 4;
     uint8_t version = *cursor++;
-    if (version != BINARY_VERSION && version != 2) {
+    if (version != BINARY_VERSION && version != 2 && version != 3) {
         free(data);
         fatal("schema_gen: existing binary schema '%s' has incompatible version (%u)", path, (unsigned)version);
     }
@@ -3196,6 +3614,11 @@ static void compat_parse_binary_schema(const char *path, size_t builtin_alias_co
         if (cursor >= end) { free(data); fatal("schema_gen: truncated schema while reading kind"); }
         t->kind = *cursor++;
         t->type_id = (uint32_t)compat_read_varuint(&cursor, end);
+        if (t->kind == 3 && version >= 4) {
+            t->union_base_type_id = (uint32_t)compat_read_varuint(&cursor, end);
+        } else {
+            t->union_base_type_id = 0;
+        }
         uint64_t fcount = compat_read_varuint(&cursor, end);
         t->field_count = (uint32_t)fcount;
         if (fcount > 0) {
@@ -3230,6 +3653,41 @@ static void check_backward_compatibility(const char *existing_path, const Schema
         if (ot->kind == 0) {
             if (!find_enum_const(schema, ot->name)) {
                 fatal("%s: incompatible change: removed enum '%s'", schema->filename, ot->name);
+            }
+            continue;
+        }
+        if (ot->kind == 3) { // UNION
+            const UnionDef *un = find_union_const(schema, ot->name);
+            if (!un) { fatal("%s: incompatible change: removed union '%s'", schema->filename, ot->name); }
+            uint32_t new_base_id = get_type_id(schema, un->base_type);
+            if (new_base_id != ot->union_base_type_id) {
+                const char *old_base = compat_find_type_name_by_id(&old_schema, schema->builtin_alias_count, ot->union_base_type_id);
+                fatal("%s:%zu: incompatible change: union '%s' tag type changed (was '%s')", schema->filename, un->line, un->name, old_base ? old_base : "(unknown)");
+            }
+            if (un->field_count != ot->field_count) {
+                fatal("%s:%zu: incompatible change: union '%s' variant count changed (was %u, now %zu)", schema->filename, un->line, un->name, ot->field_count, un->field_count);
+            }
+            for (size_t j = 0; j < ot->field_count; ++j) {
+                const CompatField *of = &ot->fields[j];
+                const UnionField *nf = NULL;
+                for (size_t k = 0; k < un->field_count; ++k) {
+                    if (un->fields[k].field_id == of->id) { nf = &un->fields[k]; break; }
+                }
+                if (!nf) {
+                    fatal("%s:%zu: incompatible change: removed union variant id %u from '%s'", schema->filename, un->line, of->id, un->name);
+                }
+                if (strcmp(nf->name, of->name) != 0) {
+                    fatal("%s:%zu: incompatible change: union variant id %u renamed from '%s' to '%s'", schema->filename, un->line, of->id, of->name, nf->name);
+                }
+                const char *old_type_name = compat_find_type_name_by_id(&old_schema, schema->builtin_alias_count, of->type_id);
+                if (!old_type_name) {
+                    fatal("%s:%zu: incompatible change: union variant '%s' refers to unknown type id %u in existing schema", schema->filename, un->line, nf->name, of->type_id);
+                }
+                uint32_t new_old_type_id = get_type_id(schema, old_type_name);
+                uint32_t new_field_type_id = get_type_id(schema, nf->type_name);
+                if (new_old_type_id != new_field_type_id) {
+                    fatal("%s:%zu: incompatible change: union variant '%s' type changed (was '%s')", schema->filename, un->line, nf->name, old_type_name);
+                }
             }
             continue;
         }
@@ -3358,8 +3816,9 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
     sb_append(decls,
         "typedef struct %sSchemaType {\n"
         "    const char *name;\n"
-        "    uint8_t kind; // 0=ENUM, 1=STRUCT, 2=MESSAGE\n"
+        "    uint8_t kind; // 0=ENUM, 1=STRUCT, 2=MESSAGE, 3=UNION\n"
         "    uint32_t type_id;\n"
+        "    uint32_t tag_type_id; // only for unions\n"
         "    %sSchemaField *fields;\n"
         "    uint32_t field_count;\n"
         "} %sSchemaType;\n\n",
@@ -3415,7 +3874,7 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    if (size < 5 || memcmp(cursor, %sBINARY_MAGIC, 4) != 0) return NULL;\n"
         "    cursor += 4;\n"
         "    uint8_t version = *cursor++;\n"
-        "    if (version != %sBINARY_VERSION && version != 2) return NULL;\n"
+        "    if (version != %sBINARY_VERSION && version != 2 && version != 3) return NULL;\n"
         "    \n"
         "    uint64_t count = %sread_varuint(&cursor, end);\n"
         "    %sSchemaInfo *info = (%sSchemaInfo *)%sbuffer_push_aligned(allocator, sizeof(%sSchemaInfo), sizeof(void*));\n"
@@ -3430,6 +3889,11 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "        type->name = %sread_strz(&cursor, end);\n"
         "        type->kind = *cursor++;\n"
         "        type->type_id = (uint32_t)%sread_varuint(&cursor, end);\n"
+        "        if (type->kind == 3 && version >= 4) {\n"
+        "            type->tag_type_id = (uint32_t)%sread_varuint(&cursor, end);\n"
+        "        } else {\n"
+        "            type->tag_type_id = 0;\n"
+        "        }\n"
         "        uint64_t fcount = %sread_varuint(&cursor, end);\n"
         "        type->field_count = (uint32_t)fcount;\n"
         "        if (fcount > 0) {\n"
@@ -3477,21 +3941,30 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    }\n"
         "    return info;\n"
         "}\n\n",
-        schema->prefix, schema->prefix, schema->prefix,
-        schema->prefix, schema->prefix,
-        schema->prefix,
-        schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix,
-        schema->prefix, schema->prefix, schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix, schema->prefix, schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix,
-        schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix);
+        schema->prefix, // SchemaInfo
+        schema->prefix, // parse_schema name
+        schema->prefix, // Buffer
+        schema->prefix, // BINARY_MAGIC
+        schema->prefix, // BINARY_VERSION
+        schema->prefix, // read_varuint
+        schema->prefix, schema->prefix, schema->prefix, schema->prefix, // SchemaInfo allocation
+        schema->prefix, schema->prefix, schema->prefix, // types allocation
+        schema->prefix, // SchemaType reference
+        schema->prefix, // read_strz
+        schema->prefix, // type_id varuint
+        schema->prefix, // tag_type_id varuint
+        schema->prefix, // fcount read
+        schema->prefix, schema->prefix, schema->prefix, // fields allocation
+        schema->prefix, // field name
+        schema->prefix, // field id
+        schema->prefix, // field type id
+        schema->prefix, // bit width
+        schema->prefix, // type ref in resolver
+        schema->prefix, // TypeDescription
+        schema->prefix, schema->prefix, // type_descriptions size uses
+        schema->prefix, schema->prefix, // strcmp type_descriptions
+        schema->prefix, // desc pointer
+        schema->prefix); // SchemaField in mapping
 
     sb_append(impl,
         "const uint8_t *%sget_schema_blob(size_t *out_size) {\n"
@@ -3563,6 +4036,17 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "        uint32_t tmp; return %sread_var_u32(buffer, &tmp);\n"
         "    }\n"
         "    \n"
+        "    if (type->kind == 3) { // UNION\n"
+        "        uint32_t tag = 0;\n"
+        "        if (!%sread_var_u32(buffer, &tag)) return false;\n"
+        "        const %sSchemaField *field = NULL;\n"
+        "        for (uint32_t i = 0; i < type->field_count; ++i) {\n"
+        "            if (type->fields[i].id == tag) { field = &type->fields[i]; break; }\n"
+        "        }\n"
+        "        if (!field) { return false; }\n"
+        "        return %sskip_generic(buffer, field->type_id, field->is_array, schema);\n"
+        "    }\n"
+        "    \n"
         "    // STRUCT or MESSAGE\n"
         "    if (type->kind == 2) { // MESSAGE\n"
         "        // Messages are length-delimited; skip fields until the terminator tag.\n"
@@ -3613,15 +4097,30 @@ static void append_runtime_schema_defs(StringBuilder *decls, StringBuilder *impl
         "    }\n"
         "    return true;\n"
         "}\n\n",
-        schema->prefix, schema->prefix, schema->prefix,
-        schema->prefix, schema->prefix,
-        schema->prefix,
-        schema->prefix, schema->prefix, schema->prefix, schema->prefix, schema->prefix,
-        schema->prefix, schema->prefix, schema->prefix,
-        schema->prefix, schema->prefix,
-        schema->prefix, schema->prefix, schema->prefix,
-        schema->prefix,
-        schema->prefix);
+        schema->prefix, // skip_generic name
+        schema->prefix, // Buffer
+        schema->prefix, // SchemaInfo
+        schema->prefix, // read_var_u32 (array)
+        schema->prefix, // recursive skip
+        schema->prefix, // buffer_skip_bytes
+        schema->prefix, // read_var_u32
+        schema->prefix, // read_var_u64
+        schema->prefix, // read_compact_f32
+        schema->prefix, // read_compact_f64
+        schema->prefix, // SchemaType
+        schema->prefix, // enum read_var_u32
+        schema->prefix, // union tag read_var_u32
+        schema->prefix, // SchemaField
+        schema->prefix, // recursive union skip
+        schema->prefix, // wireType
+        schema->prefix, // wireType
+        schema->prefix, // read_wire_tag
+        schema->prefix, // skip_wire_value
+        schema->prefix, // BitReader
+        schema->prefix, // buffer_read_bytes
+        schema->prefix, // bitreader_align
+        schema->prefix, // bitreader_read
+        schema->prefix); // recursive struct skip
 }
 
 int main(int argc, char **argv) {

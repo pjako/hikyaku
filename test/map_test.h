@@ -202,8 +202,9 @@ typedef struct gen_SchemaField {
 
 typedef struct gen_SchemaType {
     const char *name;
-    uint8_t kind; // 0=ENUM, 1=STRUCT, 2=MESSAGE
+    uint8_t kind; // 0=ENUM, 1=STRUCT, 2=MESSAGE, 3=UNION
     uint32_t type_id;
+    uint32_t tag_type_id; // only for unions
     gen_SchemaField *fields;
     uint32_t field_count;
 } gen_SchemaType;
@@ -1124,11 +1125,11 @@ bool gen_Player_skip_compact(gen_Buffer *buffer) {
 }
 
 #define gen_BINARY_MAGIC "BKIW"
-#define gen_BINARY_VERSION 3
+#define gen_BINARY_VERSION 4
 
 const uint8_t gen_schema_blob[] = {
 
-    0x42, 0x4b, 0x49, 0x57, 0x03, 0x03, 0x41, 0x63, 0x68, 0x69, 0x65, 0x76, 0x65, 0x6d, 0x65, 0x6e, 
+    0x42, 0x4b, 0x49, 0x57, 0x04, 0x03, 0x41, 0x63, 0x68, 0x69, 0x65, 0x76, 0x65, 0x6d, 0x65, 0x6e, 
     0x74, 0x00, 0x01, 0x0c, 0x01, 0x61, 0x63, 0x68, 0x69, 0x65, 0x76, 0x65, 0x6d, 0x65, 0x6e, 0x74, 
     0x49, 0x64, 0x00, 0x00, 0x02, 0x00, 0x00, 0x53, 0x74, 0x72, 0x69, 0x6e, 0x67, 0x41, 0x63, 0x68, 
     0x69, 0x65, 0x76, 0x65, 0x6d, 0x65, 0x6e, 0x74, 0x50, 0x61, 0x69, 0x72, 0x00, 0x01, 0x0d, 0x02, 
@@ -1164,7 +1165,7 @@ const gen_SchemaInfo *gen_parse_schema(const uint8_t *data, size_t size, gen_Buf
     if (size < 5 || memcmp(cursor, gen_BINARY_MAGIC, 4) != 0) return NULL;
     cursor += 4;
     uint8_t version = *cursor++;
-    if (version != gen_BINARY_VERSION && version != 2) return NULL;
+    if (version != gen_BINARY_VERSION && version != 2 && version != 3) return NULL;
     
     uint64_t count = gen_read_varuint(&cursor, end);
     gen_SchemaInfo *info = (gen_SchemaInfo *)gen_buffer_push_aligned(allocator, sizeof(gen_SchemaInfo), sizeof(void*));
@@ -1179,6 +1180,11 @@ const gen_SchemaInfo *gen_parse_schema(const uint8_t *data, size_t size, gen_Buf
         type->name = gen_read_strz(&cursor, end);
         type->kind = *cursor++;
         type->type_id = (uint32_t)gen_read_varuint(&cursor, end);
+        if (type->kind == 3 && version >= 4) {
+            type->tag_type_id = (uint32_t)gen_read_varuint(&cursor, end);
+        } else {
+            type->tag_type_id = 0;
+        }
         uint64_t fcount = gen_read_varuint(&cursor, end);
         type->field_count = (uint32_t)fcount;
         if (fcount > 0) {
@@ -1288,6 +1294,17 @@ bool gen_skip_generic(gen_Buffer *buffer, uint32_t type_id, bool is_array, const
     
     if (type->kind == 0) { // ENUM
         uint32_t tmp; return gen_read_var_u32(buffer, &tmp);
+    }
+    
+    if (type->kind == 3) { // UNION
+        uint32_t tag = 0;
+        if (!gen_read_var_u32(buffer, &tag)) return false;
+        const gen_SchemaField *field = NULL;
+        for (uint32_t i = 0; i < type->field_count; ++i) {
+            if (type->fields[i].id == tag) { field = &type->fields[i]; break; }
+        }
+        if (!field) { return false; }
+        return gen_skip_generic(buffer, field->type_id, field->is_array, schema);
     }
     
     // STRUCT or MESSAGE
